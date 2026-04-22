@@ -1,4 +1,4 @@
-# Zelle Notifier — GUI App
+# Cha-Ching Payment Notifications — GUI App
 
 Your front desk Windows PC announces Zelle payments out loud the moment they arrive.
 
@@ -6,14 +6,14 @@ Your front desk Windows PC announces Zelle payments out loud the moment they arr
 
 ## For End Users (Front Desk PC)
 
-1. **Download `ZelleNotifier.exe`** — copy it anywhere on the PC (Desktop is fine)
+1. **Download `ChaChing.exe`** — copy it anywhere on the PC (Desktop is fine)
 2. **Double-click to run** — a setup window will appear
 3. **Enter your Gmail address** and App Password ([get one here](https://myaccount.google.com/apppasswords))
 4. Click **Test Connection** to verify it works
 5. Click **Save & Start Monitoring** — the app minimizes to the system tray
 6. Done — it runs silently in the background forever
 
-The Zelle Notifier icon appears in the taskbar tray (bottom-right corner):
+The Cha-Ching Payment Notifications icon appears in the taskbar tray (bottom-right corner):
 - **Green bell** = listening, ready
 - **Yellow bell** = reconnecting (brief)
 - **Gray bell** = stopped
@@ -27,7 +27,7 @@ Right-click the tray icon to access **Settings**, **Test Announcement**, or **Ex
 So it starts automatically when the PC logs in:
 
 1. Press `Win + R` → type `shell:startup` → press Enter
-2. Create a shortcut to `ZelleNotifier.exe` in that folder
+2. Create a shortcut to `ChaChing.exe` in that folder
 3. Done — it will start every time Windows boots
 
 ---
@@ -44,7 +44,7 @@ So it starts automatically when the PC logs in:
 ### 3. Create an App Password
 - [myaccount.google.com](https://myaccount.google.com) → Security → **App passwords**
 - App: **Mail** → Device: **Windows Computer** → **Generate**
-- Copy the 16-character code — paste it into Zelle Notifier
+- Copy the 16-character code — paste it into Cha-Ching Payment Notifications
 
 ---
 
@@ -57,7 +57,7 @@ pip install -r requirements.txt
 build.bat
 ```
 
-Output: `dist\ZelleNotifier.exe`
+Output: `dist\ChaChing.exe`
 
 ---
 

@@ -1,11 +1,11 @@
 """
-Config management — reads/writes to %APPDATA%\\ZelleNotifier\\config.json
+Config management — reads/writes to %APPDATA%\\ChaChing\\config.json
 """
 
 import json
 import os
 
-CONFIG_DIR = os.path.join(os.getenv("APPDATA", "."), "ZelleNotifier")
+CONFIG_DIR = os.path.join(os.getenv("APPDATA", "."), "ChaChing")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 

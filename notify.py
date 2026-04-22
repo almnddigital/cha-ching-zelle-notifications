@@ -6,7 +6,8 @@ Uses Windows built-in Speech API (SAPI5) via pyttsx3 and winsound.Beep
 for the ka-ching effect. No internet required.
 """
 
-import time
+import os
+import sys
 import threading
 import winsound
 
@@ -16,13 +17,16 @@ import customtkinter as ctk
 _open_popups = []
 
 
+def _resource_path(name):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+_KACHING_WAV = _resource_path("chachingsound.wav")
+
+
 def _kaching():
-    """Play a cash-register style ascending chime."""
-    winsound.Beep(880, 60)
-    winsound.Beep(1047, 60)
-    winsound.Beep(1319, 60)
-    winsound.Beep(2637, 220)
-    time.sleep(0.15)
+    winsound.PlaySound(_KACHING_WAV, winsound.SND_FILENAME)
 
 
 def _speak(text):
@@ -38,9 +42,9 @@ def _speak(text):
 def announce(name, amount):
     """Play ka-ching chime then speak the announcement in a background thread."""
     if name and amount:
-        text = f"Zelle payment received. {amount} from {name}."
+        text = f"Payment of {amount} received from {name}."
     elif amount:
-        text = f"Zelle payment received. {amount}."
+        text = f"Payment of {amount} received."
     else:
         text = "Zelle payment received."
 

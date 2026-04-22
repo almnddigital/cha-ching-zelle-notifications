@@ -22,7 +22,7 @@ class SetupWindow(ctk.CTkToplevel):
     def __init__(self, master, on_save, existing_config=None):
         super().__init__(master)
         self.on_save = on_save
-        self.title("Zelle Notifier — Setup")
+        self.title("Cha-Ching Payment Notifications — Setup")
         self.geometry("440x520")
         self.resizable(False, False)
         self.lift()
@@ -35,7 +35,7 @@ class SetupWindow(ctk.CTkToplevel):
         # ── Header ──────────────────────────────────────────────────────
         ctk.CTkLabel(
             self,
-            text="Zelle Notifier",
+            text="Cha-Ching Payment Notifications",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(pady=(28, 2))
 

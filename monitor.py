@@ -8,6 +8,7 @@ Handles Chase, Bank of America, Wells Fargo, and other bank formats.
 Runs in a background thread. Auto-reconnects on connection drops.
 """
 
+import logging
 import re
 import threading
 import time
@@ -37,8 +38,8 @@ SUBJECT_PATTERNS = [
 ]
 
 BODY_NAME_PATTERNS = [
-    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you money", re.IGNORECASE),
-    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you\s+\$", re.IGNORECASE),
+    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you money"),
+    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you\s+\$"),
 ]
 
 BODY_AMOUNT_PATTERN = re.compile(r"Amount[\s\S]{0,300}?\$([\d,]+\.?\d{0,2})", re.IGNORECASE)
@@ -120,20 +121,25 @@ class Monitor:
                 self.on_status("connecting")
                 with IMAPClient(IMAP_HOST, ssl=True) as client:
                     client.login(self.gmail, self.app_password)
-                    client.select_folder("INBOX")
+                    folders = [f[2] for f in client.list_folders()]
+                    logging.info(f"FOLDERS: {folders}")
+                    client.select_folder("[Gmail]/All Mail")
                     self.on_status("connected")
                     backoff = 5
                     # Track ALL existing UIDs — catches read AND unread new emails
                     seen = set(client.search(["ALL"]))
+                    logging.info(f"BASELINE: {len(seen)} existing UIDs")
                     while not self._stop_event.is_set():
                         client.idle()
                         responses = client.idle_check(timeout=IDLE_TIMEOUT)
                         client.idle_done()
+                        logging.info(f"IDLE tick: {len(responses)} responses")
                         if not responses:
                             continue
                         all_uids = set(client.search(["ALL"]))
                         new_uids = all_uids - seen
                         seen = all_uids
+                        logging.info(f"NEW UIDS: {sorted(new_uids)}")
                         for uid in new_uids:
                             try:
                                 data = client.fetch([uid], ["ENVELOPE", "BODY[]"])
@@ -142,7 +148,9 @@ class Monitor:
                                 domain = ""
                                 if env.from_:
                                     domain = (env.from_[0].host or b"").decode("utf-8", errors="replace")
-                                if not _is_zelle(subject, domain):
+                                matched = _is_zelle(subject, domain)
+                                logging.info(f"UID {uid}: subj={subject!r} domain={domain!r} zelle={matched}")
+                                if not matched:
                                     continue
                                 name, amount = _parse_subject(subject)
                                 if not name or not amount:
@@ -150,9 +158,10 @@ class Monitor:
                                     bn, ba = _parse_body(raw)
                                     name = name or bn
                                     amount = amount or ba
+                                logging.info(f"UID {uid}: parsed name={name!r} amount={amount!r}")
                                 self.on_payment(name, amount)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.exception(f"UID {uid} failed: {e}")
             except Exception:
                 if self._stop_event.is_set():
                     break

@@ -1,5 +1,5 @@
 """
-Zelle Notifier — Entry Point
+Cha-Ching Payment Notifications — Entry Point
 
 Flow:
   1. Load saved config.
@@ -19,7 +19,7 @@ import notify
 import tray
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-log_path = os.path.join(os.getenv("APPDATA", "."), "ZelleNotifier", "monitor.log")
+log_path = os.path.join(os.getenv("APPDATA", "."), "ChaChing", "monitor.log")
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
 logging.basicConfig(
     filename=log_path,
@@ -88,7 +88,7 @@ def main():
 
     _tray = tray.Tray(
         on_open_settings=_open_settings,
-        on_test=notify.test_announcement,
+        on_test=lambda: _on_payment("Maria", "$45.00"),
         on_exit=_on_exit,
     )
     _tray.start()

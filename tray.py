@@ -38,7 +38,7 @@ class Tray:
 
     def _build_menu(self):
         return pystray.Menu(
-            pystray.MenuItem("Zelle Notifier", None, enabled=False),
+            pystray.MenuItem("Cha-Ching Payment Notifications", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings", lambda: self.on_open_settings()),
             pystray.MenuItem("Send Test Announcement", lambda: self.on_test()),
@@ -53,9 +53,9 @@ class Tray:
 
     def start(self):
         self._icon = pystray.Icon(
-            "ZelleNotifier",
+            "ChaChing",
             ICONS["connecting"],
-            "Zelle Notifier — Connecting…",
+            "Cha-Ching Payment Notifications — Connecting…",
             self._build_menu(),
         )
         threading.Thread(target=self._icon.run, daemon=True).start()
@@ -64,13 +64,13 @@ class Tray:
         if not self._icon:
             return
         titles = {
-            "connected": "Zelle Notifier — Listening",
-            "connecting": "Zelle Notifier — Connecting…",
-            "reconnecting": "Zelle Notifier — Reconnecting…",
-            "stopped": "Zelle Notifier — Stopped",
+            "connected": "Cha-Ching Payment Notifications — Listening",
+            "connecting": "Cha-Ching Payment Notifications — Connecting…",
+            "reconnecting": "Cha-Ching Payment Notifications — Reconnecting…",
+            "stopped": "Cha-Ching Payment Notifications — Stopped",
         }
         self._icon.icon = ICONS.get(status, ICONS["connecting"])
-        self._icon.title = titles.get(status, "Zelle Notifier")
+        self._icon.title = titles.get(status, "Cha-Ching Payment Notifications")
 
     def stop(self):
         if self._icon:
