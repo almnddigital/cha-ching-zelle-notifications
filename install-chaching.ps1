@@ -14,7 +14,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "almnddigital/ka-ching"
+$Repo = "almnddigital/cha-ching-zelle-notifications"
 $InstallDir = Join-Path $env:USERPROFILE "ChaChing"
 $ExePath = Join-Path $InstallDir "ChaChing.exe"
 
