@@ -3,6 +3,7 @@ Setup / Settings window — built with CustomTkinter.
 Opens on first run or when "Settings" is clicked from the tray.
 """
 
+import logging
 import threading
 import tkinter as tk
 import webbrowser
@@ -178,9 +179,17 @@ class SetupWindow(ctk.CTkToplevel):
         if not gmail or not pw:
             self._set_status("Both fields are required.", "#f59e0b")
             return
-        config.save(gmail, pw)
-        self.on_save(gmail, pw, "")
-        self.withdraw()
+        self._save_btn.configure(state="disabled", text="Saving...")
+        try:
+            config.save(gmail, pw)
+            self.on_save(gmail, pw, "")
+        except Exception as exc:
+            logging.exception("Could not save settings or start monitoring")
+            self._save_btn.configure(state="normal", text="Save & Start Monitoring")
+            self._set_status(f"Could not start monitoring: {exc}", "#ef4444")
+            return
+        self._set_status("Saved. Monitoring started.", "#22c55e")
+        self.after(250, self.withdraw)
 
 
 def _format_history_date(value):

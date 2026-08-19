@@ -10,11 +10,11 @@ REM  Output: dist\ChaChing.exe
 REM ─────────────────────────────────────────────────────────────────────────────
 
 echo Installing dependencies...
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 echo.
 echo Building ChaChing.exe...
-pyinstaller ^
+python -m PyInstaller ^
   --onefile ^
   --windowed ^
   --name ChaChing ^
