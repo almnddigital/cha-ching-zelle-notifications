@@ -200,11 +200,20 @@ def _format_history_date(value):
         return value or "Unknown date"
 
 
+def _format_history_sender(record):
+    name = record.get("name") or "Unknown sender"
+    email = record.get("sender_email")
+    if email and email.lower() != name.lower():
+        return f"{name}\n{email}"
+    return name
+
+
 class HistoryWindow(ctk.CTkToplevel):
     def __init__(self, master, on_backfill):
         super().__init__(master)
         self._on_backfill = on_backfill
         self._backfill_running = False
+        self._backfill_mode = "import"
         self.title("Payment History")
         self.geometry("680x620")
         self.minsize(560, 460)
@@ -291,11 +300,12 @@ class HistoryWindow(ctk.CTkToplevel):
         if backfill_state:
             self._backfill_length.set(backfill_state.get("length", "1 year"))
             self._backfill_picker.configure(state="disabled")
-            self._backfill_btn.configure(state="disabled", text="Import complete")
+            self._backfill_btn.configure(state="normal", text="Refresh senders")
             self._backfill_status.configure(
                 text=(
                     "Completed once: "
-                    f"{backfill_state.get('imported_count', 0)} payment(s) imported."
+                    f"{backfill_state.get('imported_count', 0)} payment(s) imported. "
+                    "Refresh senders to fill missing email addresses."
                 ),
                 text_color="#22c55e",
             )
@@ -344,9 +354,11 @@ class HistoryWindow(ctk.CTkToplevel):
             ).grid(row=0, column=0, sticky="ew", padx=12, pady=7)
             ctk.CTkLabel(
                 row,
-                text=record.get("name", "Unknown sender"),
+                text=_format_history_sender(record),
                 anchor="w",
                 text_color="#f3f4f6",
+                justify="left",
+                wraplength=240,
             ).grid(row=0, column=1, sticky="ew", padx=12, pady=7)
             ctk.CTkLabel(
                 row,
@@ -357,14 +369,24 @@ class HistoryWindow(ctk.CTkToplevel):
             ).grid(row=0, column=2, sticky="e", padx=12, pady=7)
 
     def _start_backfill(self):
-        if self._backfill_running or payment_history.load_backfill_state():
+        if self._backfill_running:
             return
+        backfill_state = payment_history.load_backfill_state()
+        self._backfill_mode = "refresh" if backfill_state else "import"
         self._backfill_running = True
-        length = self._backfill_length.get()
+        length = (
+            backfill_state.get("length", "1 year")
+            if backfill_state
+            else self._backfill_length.get()
+        )
         self._backfill_picker.configure(state="disabled")
         self._backfill_btn.configure(state="disabled", text="Importing...")
         self._backfill_status.configure(
-            text="Scanning Gmail. This may take a while...",
+            text=(
+                "Refreshing sender details. This may take a while..."
+                if self._backfill_mode == "refresh"
+                else "Scanning Gmail. This may take a while..."
+            ),
             text_color="#f59e0b",
         )
 
@@ -382,20 +404,31 @@ class HistoryWindow(ctk.CTkToplevel):
         threading.Thread(target=run, daemon=True).start()
 
     def _backfill_finished(self, matched_count, imported_count):
+        mode = self._backfill_mode
         self._backfill_running = False
         self.refresh()
         self._backfill_status.configure(
             text=(
-                f"Import complete: {imported_count} new payment(s) "
-                f"from {matched_count} matching email(s)."
+                (
+                    f"Sender details refreshed for {matched_count} matching email(s)."
+                    if mode == "refresh"
+                    else (
+                        f"Import complete: {imported_count} new payment(s) "
+                        f"from {matched_count} matching email(s)."
+                    )
+                )
             ),
             text_color="#22c55e",
         )
 
     def _backfill_failed(self, message):
         self._backfill_running = False
-        self._backfill_picker.configure(state="normal")
-        self._backfill_btn.configure(state="normal", text="Import once")
+        if payment_history.load_backfill_state():
+            self._backfill_picker.configure(state="disabled")
+            self._backfill_btn.configure(state="normal", text="Refresh senders")
+        else:
+            self._backfill_picker.configure(state="normal")
+            self._backfill_btn.configure(state="normal", text="Import once")
         self._backfill_status.configure(
             text=message,
             text_color="#ef4444",

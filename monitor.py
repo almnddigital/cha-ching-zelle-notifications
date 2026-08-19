@@ -82,6 +82,18 @@ def _envelope_received_at(env):
     return parsed.astimezone().isoformat(timespec="seconds")
 
 
+def _envelope_sender_email(env):
+    addresses = getattr(env, "from_", None) or []
+    if not addresses:
+        return None
+    address = addresses[0]
+    mailbox = _decode_text(getattr(address, "mailbox", None)).strip()
+    host = _decode_text(getattr(address, "host", None)).strip()
+    if mailbox and host:
+        return f"{mailbox}@{host}"
+    return None
+
+
 def _parse_subject(subject):
     m = SUBJECT_PATTERNS[0].search(subject)
     if m:
@@ -194,12 +206,15 @@ class Monitor:
                                 if not matched:
                                     continue
                                 name, amount = _parse_envelope(env, data[uid].get(b"BODY[]"))
+                                sender_email = _envelope_sender_email(env)
+                                name = name or sender_email
                                 logging.info(f"UID {uid}: parsed name={name!r} amount={amount!r}")
                                 self.on_payment(
                                     name,
                                     amount,
                                     _envelope_received_at(env),
                                     f"gmail:{uid}",
+                                    sender_email,
                                 )
                             except Exception as e:
                                 logging.exception(f"UID {uid} failed: {e}")
@@ -275,6 +290,7 @@ def fetch_historical_payments(gmail, app_password, length):
                     continue
 
                 name, amount = _parse_envelope(env)
+                sender_email = _envelope_sender_email(env)
                 if not name or not amount:
                     body_data = retry(
                         lambda: client.fetch([uid], ["BODY[]"]),
@@ -282,6 +298,7 @@ def fetch_historical_payments(gmail, app_password, length):
                     )
                     raw = body_data[uid].get(b"BODY[]")
                     name, amount = _parse_envelope(env, raw)
+                name = name or sender_email
 
                 records.append(
                     {
@@ -289,6 +306,7 @@ def fetch_historical_payments(gmail, app_password, length):
                         "amount": amount,
                         "received_at": _envelope_received_at(env),
                         "source_id": f"gmail:{uid}",
+                        "sender_email": sender_email,
                     }
                 )
             logging.info(

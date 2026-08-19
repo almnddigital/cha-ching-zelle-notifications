@@ -37,7 +37,7 @@ def load(path=HISTORY_FILE):
         return _read_unlocked(path)
 
 
-def _add_unlocked(name, amount, received_at, path, source_id):
+def _add_unlocked(name, amount, received_at, path, source_id, sender_email):
     record = {
         "received_at": received_at or datetime.now().astimezone().isoformat(timespec="seconds"),
         "name": (name or "Unknown sender").strip(),
@@ -45,27 +45,69 @@ def _add_unlocked(name, amount, received_at, path, source_id):
     }
     if source_id is not None:
         record["source_id"] = str(source_id)
+    if sender_email:
+        record["sender_email"] = str(sender_email).strip()
 
     records = _read_unlocked(path)
     if source_id is not None:
         source_id = str(source_id)
         for existing in records:
             if existing.get("source_id") == source_id:
+                changed = False
+                if (
+                    existing.get("name") in (None, "", "Unknown sender")
+                    and record["name"] != "Unknown sender"
+                ):
+                    existing["name"] = record["name"]
+                    changed = True
+                if record.get("sender_email") and not existing.get("sender_email"):
+                    existing["sender_email"] = record["sender_email"]
+                    changed = True
+                if changed:
+                    _write_unlocked(path, records)
                 return existing, False
     records.insert(0, record)
     _write_unlocked(path, records)
     return record, True
 
 
-def add(name, amount, received_at=None, path=HISTORY_FILE, source_id=None):
+def add(
+    name,
+    amount,
+    received_at=None,
+    path=HISTORY_FILE,
+    source_id=None,
+    sender_email=None,
+):
     with _LOCK:
-        record, _ = _add_unlocked(name, amount, received_at, path, source_id)
+        record, _ = _add_unlocked(
+            name,
+            amount,
+            received_at,
+            path,
+            source_id,
+            sender_email,
+        )
     return record
 
 
-def add_if_new(name, amount, received_at=None, source_id=None, path=HISTORY_FILE):
+def add_if_new(
+    name,
+    amount,
+    received_at=None,
+    source_id=None,
+    path=HISTORY_FILE,
+    sender_email=None,
+):
     with _LOCK:
-        _, inserted = _add_unlocked(name, amount, received_at, path, source_id)
+        _, inserted = _add_unlocked(
+            name,
+            amount,
+            received_at,
+            path,
+            source_id,
+            sender_email,
+        )
     return inserted
 
 

@@ -5,14 +5,15 @@ from datetime import datetime, timezone
 
 
 class FakeAddress:
-    def __init__(self, host):
+    def __init__(self, host, mailbox="sender"):
         self.host = host
+        self.mailbox = mailbox
 
 
 class FakeEnvelope:
-    def __init__(self, subject, host, received_at):
+    def __init__(self, subject, host, received_at, mailbox="sender"):
         self.subject = subject
-        self.from_ = [FakeAddress(host)]
+        self.from_ = [FakeAddress(host, mailbox)]
         self.date = received_at
 
 
@@ -89,6 +90,9 @@ class MonitorBackfillTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["name"], "Maria Lopez")
         self.assertEqual(records[0]["amount"], "$45.00")
+        self.assertEqual(
+            records[0]["sender_email"], "sender@notifications.chase.com"
+        )
         self.assertEqual(records[1]["amount"], "$30.00")
         self.assertEqual(records[1]["source_id"], "gmail:3")
 

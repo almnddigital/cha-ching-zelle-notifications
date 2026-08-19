@@ -39,7 +39,14 @@ _update_prompted_version = None
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
-def _on_payment(name, amount, received_at=None, source_id=None, is_test=False):
+def _on_payment(
+    name,
+    amount,
+    received_at=None,
+    source_id=None,
+    sender_email=None,
+    is_test=False,
+):
     logging.info(f"PAYMENT TRIGGERED: name={name} amount={amount}")
     if not is_test:
         try:
@@ -48,6 +55,7 @@ def _on_payment(name, amount, received_at=None, source_id=None, is_test=False):
                 amount,
                 received_at=received_at,
                 source_id=source_id,
+                sender_email=sender_email,
             )
         except Exception:
             logging.exception("Could not save payment history")
@@ -114,6 +122,7 @@ def _run_backfill(length):
                 record["amount"],
                 received_at=record["received_at"],
                 source_id=record["source_id"],
+                sender_email=record.get("sender_email"),
             )
             for record in records
         )
