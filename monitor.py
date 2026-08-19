@@ -8,8 +8,10 @@ Handles Chase, Bank of America, Wells Fargo, and other bank formats.
 Runs in a background thread. Auto-reconnects on connection drops.
 """
 
+import imaplib
 import logging
 import re
+import socket
 import threading
 import time
 import email as email_lib
@@ -46,6 +48,8 @@ BODY_NAME_PATTERNS = [
 
 BODY_AMOUNT_PATTERN = re.compile(r"Amount[\s\S]{0,300}?\$([\d,]+\.?\d{0,2})", re.IGNORECASE)
 BACKFILL_YEARS = {"1 year": 1, "2 years": 2}
+BACKFILL_RETRIES = 3
+IMAP_RETRY_ERRORS = (imaplib.IMAP4.abort, OSError, socket.timeout)
 
 
 def _is_zelle(subject, domain):
@@ -218,13 +222,46 @@ def fetch_historical_payments(gmail, app_password, length):
         criteria = ["SINCE", since.strftime("%d-%b-%Y")]
 
     records = []
-    with IMAPClient(IMAP_HOST, ssl=True) as client:
+    client = IMAPClient(IMAP_HOST, ssl=True)
+
+    def reconnect():
+        nonlocal client
+        try:
+            client.logout()
+        except Exception:
+            pass
+        time.sleep(1)
+        client = IMAPClient(IMAP_HOST, ssl=True)
         client.login(gmail, app_password)
         client.select_folder("[Gmail]/All Mail")
-        uids = client.search(criteria)
+
+    def retry(operation, label):
+        for attempt in range(BACKFILL_RETRIES):
+            try:
+                return operation()
+            except IMAP_RETRY_ERRORS as exc:
+                if attempt == BACKFILL_RETRIES - 1:
+                    raise
+                logging.warning(
+                    "BACKFILL: %s failed; reconnecting (%d/%d): %s",
+                    label,
+                    attempt + 1,
+                    BACKFILL_RETRIES - 1,
+                    exc,
+                )
+                reconnect()
+
+    try:
+        client.login(gmail, app_password)
+        client.select_folder("[Gmail]/All Mail")
+        uids = retry(lambda: client.search(criteria), "search")
+        logging.info("BACKFILL: scanning %d messages", len(uids))
         for start in range(0, len(uids), 100):
             batch = uids[start : start + 100]
-            envelopes = client.fetch(batch, ["ENVELOPE"])
+            envelopes = retry(
+                lambda: client.fetch(batch, ["ENVELOPE"]),
+                f"envelopes {start + 1}-{start + len(batch)}",
+            )
             for uid in batch:
                 data = envelopes.get(uid)
                 if not data:
@@ -239,7 +276,10 @@ def fetch_historical_payments(gmail, app_password, length):
 
                 name, amount = _parse_envelope(env)
                 if not name or not amount:
-                    body_data = client.fetch([uid], ["BODY[]"])
+                    body_data = retry(
+                        lambda: client.fetch([uid], ["BODY[]"]),
+                        f"body uid {uid}",
+                    )
                     raw = body_data[uid].get(b"BODY[]")
                     name, amount = _parse_envelope(env, raw)
 
@@ -251,6 +291,16 @@ def fetch_historical_payments(gmail, app_password, length):
                         "source_id": f"gmail:{uid}",
                     }
                 )
+            logging.info(
+                "BACKFILL: scanned %d/%d messages",
+                min(start + len(batch), len(uids)),
+                len(uids),
+            )
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
     return records
 
 
