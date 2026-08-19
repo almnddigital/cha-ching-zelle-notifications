@@ -16,6 +16,9 @@ import monitor
 import payment_history
 
 APP_PASSWORD_HELP_URL = "https://myaccount.google.com/apppasswords"
+BACKFILL_LENGTHS = ["1 year", "2 years", "Max"]
+BACKFILL_ORDER = {length: index for index, length in enumerate(BACKFILL_LENGTHS)}
+HISTORY_PAGE_SIZE = 100
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -211,14 +214,20 @@ def _format_history_sender(record):
 class HistoryWindow(ctk.CTkToplevel):
     def __init__(self, master, on_backfill):
         super().__init__(master)
+        self.withdraw()
         self._on_backfill = on_backfill
         self._backfill_running = False
         self._backfill_mode = "import"
+        self._records = []
+        self._filtered_records = []
+        self._page = 0
         self.title("Payment History")
         self.geometry("680x620")
         self.minsize(560, 460)
         self._build()
         self.refresh()
+        self.update_idletasks()
+        self.deiconify()
         self.lift()
         self.focus_force()
 
@@ -231,8 +240,49 @@ class HistoryWindow(ctk.CTkToplevel):
         self._summary = ctk.CTkLabel(self, text="", text_color="#9ca3af")
         self._summary.pack(pady=(0, 14))
 
+        search_row = ctk.CTkFrame(self, fg_color="transparent")
+        search_row.pack(fill="x", padx=24, pady=(0, 10))
+        self._search_var = tk.StringVar()
+        self._search_entry = ctk.CTkEntry(
+            search_row,
+            textvariable=self._search_var,
+            placeholder_text="Search name, email, amount, or date",
+            height=36,
+        )
+        self._search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            search_row,
+            text="Search",
+            width=90,
+            command=self._apply_search,
+        ).pack(side="right")
+        self._search_entry.bind("<Return>", lambda _event: self._apply_search())
+
         self._rows = ctk.CTkScrollableFrame(self, corner_radius=8)
         self._rows.pack(fill="both", expand=True, padx=24, pady=(0, 14))
+
+        pagination_row = ctk.CTkFrame(self, fg_color="transparent")
+        pagination_row.pack(fill="x", padx=24, pady=(0, 14))
+        self._previous_btn = ctk.CTkButton(
+            pagination_row,
+            text="Previous",
+            width=100,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=lambda: self._change_page(-1),
+        )
+        self._previous_btn.pack(side="left")
+        self._page_label = ctk.CTkLabel(pagination_row, text="")
+        self._page_label.pack(side="left", expand=True)
+        self._next_btn = ctk.CTkButton(
+            pagination_row,
+            text="Next",
+            width=100,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=lambda: self._change_page(1),
+        )
+        self._next_btn.pack(side="right")
 
         backfill_panel = ctk.CTkFrame(self, fg_color="#111827")
         backfill_panel.pack(fill="x", padx=24, pady=(0, 14))
@@ -254,8 +304,9 @@ class HistoryWindow(ctk.CTkToplevel):
         self._backfill_picker = ctk.CTkOptionMenu(
             backfill_controls,
             variable=self._backfill_length,
-            values=["1 year", "2 years", "Max"],
+            values=BACKFILL_LENGTHS,
             width=120,
+            command=self._backfill_selection_changed,
         )
         self._backfill_picker.pack(side="left")
         self._backfill_btn = ctk.CTkButton(
@@ -291,31 +342,64 @@ class HistoryWindow(ctk.CTkToplevel):
         ).pack(side="right")
 
     def refresh(self):
-        records = payment_history.load()
-        total = payment_history.total_amount(records)
-        self._summary.configure(
-            text=f"{len(records)} payment(s)  •  Known total: ${total:,.2f}"
+        self._records = payment_history.load()
+        self._update_backfill_controls()
+        self._apply_search()
+
+    def _apply_search(self):
+        query = self._search_var.get().strip().casefold()
+        if query:
+            self._filtered_records = [
+                record
+                for record in self._records
+                if query
+                in " ".join(
+                    str(record.get(field, ""))
+                    for field in ("name", "sender_email", "amount", "received_at")
+                ).casefold()
+            ]
+        else:
+            self._filtered_records = list(self._records)
+        self._page = 0
+        self._render_rows()
+
+    def _change_page(self, delta):
+        page_count = max(
+            1,
+            (len(self._filtered_records) + HISTORY_PAGE_SIZE - 1)
+            // HISTORY_PAGE_SIZE,
         )
-        backfill_state = payment_history.load_backfill_state()
-        if backfill_state:
-            self._backfill_length.set(backfill_state.get("length", "1 year"))
-            self._backfill_picker.configure(state="disabled")
-            self._backfill_btn.configure(state="normal", text="Refresh senders")
-            self._backfill_status.configure(
-                text=(
-                    "Completed once: "
-                    f"{backfill_state.get('imported_count', 0)} payment(s) imported. "
-                    "Refresh senders to fill missing email addresses."
-                ),
-                text_color="#22c55e",
+        self._page = max(0, min(self._page + delta, page_count - 1))
+        self._render_rows()
+
+    def _render_rows(self):
+        total = payment_history.total_amount(self._filtered_records)
+        if len(self._filtered_records) == len(self._records):
+            summary = f"{len(self._records)} payment(s)  •  Known total: ${total:,.2f}"
+        else:
+            summary = (
+                f"{len(self._filtered_records)} matching of {len(self._records)} payment(s)  "
+                f"•  Known total: ${total:,.2f}"
             )
-        elif not self._backfill_running:
-            self._backfill_picker.configure(state="normal")
-            self._backfill_btn.configure(state="normal", text="Import once")
-            self._backfill_status.configure(
-                text="Choose a range. This import can only run once.",
-                text_color="#9ca3af",
-            )
+        self._summary.configure(text=summary)
+
+        page_count = max(
+            1,
+            (len(self._filtered_records) + HISTORY_PAGE_SIZE - 1)
+            // HISTORY_PAGE_SIZE,
+        )
+        self._page = min(self._page, page_count - 1)
+        start = self._page * HISTORY_PAGE_SIZE
+        page_records = self._filtered_records[start : start + HISTORY_PAGE_SIZE]
+        end = min(start + len(page_records), len(self._filtered_records))
+        self._page_label.configure(
+            text=(f"{start + 1}-{end} of {len(self._filtered_records)}" if end else "0 results")
+        )
+        self._previous_btn.configure(state="normal" if self._page else "disabled")
+        self._next_btn.configure(
+            state="normal" if self._page < page_count - 1 else "disabled"
+        )
+
         for child in self._rows.winfo_children():
             child.destroy()
 
@@ -333,15 +417,19 @@ class HistoryWindow(ctk.CTkToplevel):
             row=0, column=2, sticky="e", padx=12, pady=8
         )
 
-        if not records:
+        if not page_records:
             ctk.CTkLabel(
                 self._rows,
-                text="No payments recorded yet.",
+                text=(
+                    "No matching payments."
+                    if self._records and self._search_var.get().strip()
+                    else "No payments recorded yet."
+                ),
                 text_color="#9ca3af",
             ).pack(pady=32)
             return
 
-        for record in records:
+        for record in page_records:
             row = ctk.CTkFrame(self._rows, fg_color="transparent")
             row.pack(fill="x", pady=1)
             row.grid_columnconfigure(0, weight=1)
@@ -368,23 +456,74 @@ class HistoryWindow(ctk.CTkToplevel):
                 text_color="#22c55e",
             ).grid(row=0, column=2, sticky="e", padx=12, pady=7)
 
+    def _update_backfill_controls(self):
+        backfill_state = payment_history.load_backfill_state()
+        if backfill_state:
+            saved_length = backfill_state.get("length", "1 year")
+            self._backfill_length.set(saved_length)
+            self._backfill_picker.configure(
+                state="disabled" if saved_length == "Max" else "normal"
+            )
+            self._backfill_selection_changed()
+            self._backfill_status.configure(
+                text=(
+                    "Completed once: "
+                    f"{backfill_state.get('imported_count', 0)} payment(s) imported. "
+                    "Choose a longer range to expand history, or refresh senders."
+                ),
+                text_color="#22c55e",
+            )
+        elif not self._backfill_running:
+            self._backfill_picker.configure(state="normal")
+            self._backfill_btn.configure(state="normal", text="Import once")
+            self._backfill_status.configure(
+                text="Choose a range. This import can only run once.",
+                text_color="#9ca3af",
+            )
+
+    def _backfill_selection_changed(self, _value=None):
+        backfill_state = payment_history.load_backfill_state()
+        if not backfill_state:
+            self._backfill_btn.configure(text="Import once")
+            return
+        current = backfill_state.get("length", "1 year")
+        selected = self._backfill_length.get()
+        if BACKFILL_ORDER[selected] > BACKFILL_ORDER[current]:
+            self._backfill_btn.configure(text="Expand history")
+        else:
+            self._backfill_btn.configure(text="Refresh senders")
+
     def _start_backfill(self):
         if self._backfill_running:
             return
         backfill_state = payment_history.load_backfill_state()
-        self._backfill_mode = "refresh" if backfill_state else "import"
+        selected_length = self._backfill_length.get()
+        if backfill_state:
+            current_length = backfill_state.get("length", "1 year")
+            if BACKFILL_ORDER[selected_length] < BACKFILL_ORDER[current_length]:
+                self._backfill_status.configure(
+                    text=f"Choose {current_length} or a longer range.",
+                    text_color="#f59e0b",
+                )
+                return
+            self._backfill_mode = (
+                "expand"
+                if BACKFILL_ORDER[selected_length] > BACKFILL_ORDER[current_length]
+                else "refresh"
+            )
+            length = selected_length
+        else:
+            self._backfill_mode = "import"
+            length = selected_length
         self._backfill_running = True
-        length = (
-            backfill_state.get("length", "1 year")
-            if backfill_state
-            else self._backfill_length.get()
-        )
         self._backfill_picker.configure(state="disabled")
-        self._backfill_btn.configure(state="disabled", text="Importing...")
+        self._backfill_btn.configure(state="disabled", text="Working...")
         self._backfill_status.configure(
             text=(
                 "Refreshing sender details. This may take a while..."
                 if self._backfill_mode == "refresh"
+                else "Expanding history. This may take a while..."
+                if self._backfill_mode == "expand"
                 else "Scanning Gmail. This may take a while..."
             ),
             text_color="#f59e0b",
@@ -413,6 +552,11 @@ class HistoryWindow(ctk.CTkToplevel):
                     f"Sender details refreshed for {matched_count} matching email(s)."
                     if mode == "refresh"
                     else (
+                        f"History expanded: {imported_count} new payment(s) "
+                        f"from {matched_count} matching email(s)."
+                    )
+                    if mode == "expand"
+                    else (
                         f"Import complete: {imported_count} new payment(s) "
                         f"from {matched_count} matching email(s)."
                     )
@@ -423,12 +567,7 @@ class HistoryWindow(ctk.CTkToplevel):
 
     def _backfill_failed(self, message):
         self._backfill_running = False
-        if payment_history.load_backfill_state():
-            self._backfill_picker.configure(state="disabled")
-            self._backfill_btn.configure(state="normal", text="Refresh senders")
-        else:
-            self._backfill_picker.configure(state="normal")
-            self._backfill_btn.configure(state="normal", text="Import once")
+        self._update_backfill_controls()
         self._backfill_status.configure(
             text=message,
             text_color="#ef4444",
