@@ -14,6 +14,8 @@ import threading
 import time
 import email as email_lib
 import html as html_lib
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from imapclient import IMAPClient
 
@@ -43,12 +45,37 @@ BODY_NAME_PATTERNS = [
 ]
 
 BODY_AMOUNT_PATTERN = re.compile(r"Amount[\s\S]{0,300}?\$([\d,]+\.?\d{0,2})", re.IGNORECASE)
+BACKFILL_YEARS = {"1 year": 1, "2 years": 2}
 
 
 def _is_zelle(subject, domain):
     if "zelle" in subject.lower():
         return True
     return any(d in domain.lower() for d in ZELLE_DOMAINS)
+
+
+def _decode_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _envelope_received_at(env):
+    value = getattr(env, "date", None)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = parsedate_to_datetime(_decode_text(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().isoformat(timespec="seconds")
 
 
 def _parse_subject(subject):
@@ -99,6 +126,16 @@ def _parse_body(raw_bytes):
     return name, amount
 
 
+def _parse_envelope(env, raw_bytes=None):
+    subject = _decode_text(env.subject)
+    name, amount = _parse_subject(subject)
+    if (not name or not amount) and raw_bytes:
+        body_name, body_amount = _parse_body(raw_bytes)
+        name = name or body_name
+        amount = amount or body_amount
+    return name, amount
+
+
 class Monitor:
     def __init__(self, gmail, app_password, on_payment, on_status):
         self.gmail = gmail
@@ -144,22 +181,22 @@ class Monitor:
                             try:
                                 data = client.fetch([uid], ["ENVELOPE", "BODY[]"])
                                 env = data[uid][b"ENVELOPE"]
-                                subject = (env.subject or b"").decode("utf-8", errors="replace")
+                                subject = _decode_text(env.subject)
                                 domain = ""
                                 if env.from_:
-                                    domain = (env.from_[0].host or b"").decode("utf-8", errors="replace")
+                                    domain = _decode_text(env.from_[0].host)
                                 matched = _is_zelle(subject, domain)
                                 logging.info(f"UID {uid}: subj={subject!r} domain={domain!r} zelle={matched}")
                                 if not matched:
                                     continue
-                                name, amount = _parse_subject(subject)
-                                if not name or not amount:
-                                    raw = data[uid][b"BODY[]"]
-                                    bn, ba = _parse_body(raw)
-                                    name = name or bn
-                                    amount = amount or ba
+                                name, amount = _parse_envelope(env, data[uid].get(b"BODY[]"))
                                 logging.info(f"UID {uid}: parsed name={name!r} amount={amount!r}")
-                                self.on_payment(name, amount)
+                                self.on_payment(
+                                    name,
+                                    amount,
+                                    _envelope_received_at(env),
+                                    f"gmail:{uid}",
+                                )
                             except Exception as e:
                                 logging.exception(f"UID {uid} failed: {e}")
             except Exception:
@@ -169,6 +206,52 @@ class Monitor:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
         self.on_status("stopped")
+
+
+def fetch_historical_payments(gmail, app_password, length):
+    if length not in BACKFILL_YEARS and length != "Max":
+        raise ValueError(f"Unsupported backfill length: {length}")
+
+    criteria = ["ALL"]
+    if length in BACKFILL_YEARS:
+        since = date.today() - timedelta(days=365 * BACKFILL_YEARS[length])
+        criteria = ["SINCE", since.strftime("%d-%b-%Y")]
+
+    records = []
+    with IMAPClient(IMAP_HOST, ssl=True) as client:
+        client.login(gmail, app_password)
+        client.select_folder("[Gmail]/All Mail")
+        uids = client.search(criteria)
+        for start in range(0, len(uids), 100):
+            batch = uids[start : start + 100]
+            envelopes = client.fetch(batch, ["ENVELOPE"])
+            for uid in batch:
+                data = envelopes.get(uid)
+                if not data:
+                    continue
+                env = data[b"ENVELOPE"]
+                subject = _decode_text(env.subject)
+                domain = ""
+                if env.from_:
+                    domain = _decode_text(env.from_[0].host)
+                if not _is_zelle(subject, domain):
+                    continue
+
+                name, amount = _parse_envelope(env)
+                if not name or not amount:
+                    body_data = client.fetch([uid], ["BODY[]"])
+                    raw = body_data[uid].get(b"BODY[]")
+                    name, amount = _parse_envelope(env, raw)
+
+                records.append(
+                    {
+                        "name": name,
+                        "amount": amount,
+                        "received_at": _envelope_received_at(env),
+                        "source_id": f"gmail:{uid}",
+                    }
+                )
+    return records
 
 
 def test_credentials(gmail, app_password):

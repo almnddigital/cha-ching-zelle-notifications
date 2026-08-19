@@ -15,6 +15,7 @@ import pyttsx3
 import customtkinter as ctk
 
 _open_popups = []
+_update_popup = None
 
 
 def _resource_path(name):
@@ -121,3 +122,82 @@ def show_popup(master, name, amount):
 def test_announcement():
     """Demo announcement for the tray menu test button."""
     announce("Maria", "$45.00")
+
+
+def show_update_popup(master, version, on_update):
+    global _update_popup
+    if _update_popup and _update_popup.winfo_exists():
+        _update_popup.lift()
+        _update_popup.focus_force()
+        return
+
+    popup = ctk.CTkToplevel(master)
+    _update_popup = popup
+    popup.title("Cha-Ching Update Available")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.geometry("440x240")
+
+    ctk.CTkFrame(popup, fg_color="#2563eb", height=8, corner_radius=0).pack(fill="x")
+    ctk.CTkLabel(
+        popup,
+        text="A new version is ready",
+        font=ctk.CTkFont(size=18, weight="bold"),
+    ).pack(pady=(22, 4))
+    ctk.CTkLabel(
+        popup,
+        text=f"Cha-Ching {version} is available.\nUpdate now to keep the app current?",
+        text_color="#d1d5db",
+        justify="center",
+    ).pack(pady=(0, 18))
+
+    buttons = ctk.CTkFrame(popup, fg_color="transparent")
+    buttons.pack(fill="x", padx=24, pady=(0, 22))
+
+    def dismiss():
+        global _update_popup
+        _update_popup = None
+        popup.destroy()
+
+    def update():
+        update_button.configure(state="disabled", text="Updating...")
+        later_button.configure(state="disabled")
+        popup.after(100, lambda: (dismiss(), on_update()))
+
+    later_button = ctk.CTkButton(
+        buttons,
+        text="Later",
+        width=120,
+        fg_color="#374151",
+        hover_color="#4b5563",
+        command=dismiss,
+    )
+    later_button.pack(side="left")
+    update_button = ctk.CTkButton(
+        buttons,
+        text="Update now",
+        width=160,
+        fg_color="#2563eb",
+        hover_color="#1d4ed8",
+        command=update,
+    )
+    update_button.pack(side="right")
+
+
+def show_update_error(master):
+    popup = ctk.CTkToplevel(master)
+    popup.title("Update Failed")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.geometry("420x190")
+    ctk.CTkLabel(
+        popup,
+        text="The update could not be started.",
+        font=ctk.CTkFont(size=16, weight="bold"),
+    ).pack(pady=(28, 10))
+    ctk.CTkLabel(
+        popup,
+        text="Please try again later or run install.bat manually.",
+        text_color="#d1d5db",
+    ).pack(pady=(0, 20))
+    ctk.CTkButton(popup, text="Close", width=120, command=popup.destroy).pack()

@@ -18,6 +18,7 @@ pyinstaller ^
   --onefile ^
   --windowed ^
   --name ChaChing ^
+  --hidden-import win32crypt ^
   --add-data "*.py;." ^
   --add-data "chachingsound.wav;." ^
   app.py

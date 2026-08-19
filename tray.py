@@ -30,8 +30,9 @@ ICONS = {
 
 
 class Tray:
-    def __init__(self, on_open_settings, on_test, on_exit):
+    def __init__(self, on_open_settings, on_open_history, on_test, on_exit):
         self.on_open_settings = on_open_settings
+        self.on_open_history = on_open_history
         self.on_test = on_test
         self.on_exit = on_exit
         self._icon = None
@@ -41,6 +42,7 @@ class Tray:
             pystray.MenuItem("Cha-Ching Payment Notifications", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings", lambda: self.on_open_settings()),
+            pystray.MenuItem("Payment History", lambda: self.on_open_history()),
             pystray.MenuItem("Send Test Announcement", lambda: self.on_test()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", lambda: self._do_exit()),
