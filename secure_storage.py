@@ -28,7 +28,7 @@ def _protect(value):
         None,
         None,
         0,
-    )[1]
+    )
 
 
 def _unprotect(value):
