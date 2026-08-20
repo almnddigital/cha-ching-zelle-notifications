@@ -58,7 +58,7 @@ class PaymentHistoryTests(unittest.TestCase):
         )
         self.assertEqual(len(payment_history.load(self.path)), 1)
 
-    def test_duplicate_import_fills_missing_sender_details(self):
+    def test_duplicate_import_fills_missing_payer_details(self):
         payment_history.add_if_new(
             "Unknown sender",
             "$45.00",
@@ -72,12 +72,52 @@ class PaymentHistoryTests(unittest.TestCase):
             "2026-08-13T09:30:00-07:00",
             "gmail:123",
             self.path,
-            sender_email="sender@example.com",
+            payer_email="payer@example.com",
+            payer_phone="(916) 555-1212",
         )
 
         record = payment_history.load(self.path)[0]
         self.assertEqual(record["name"], "Maria Lopez")
-        self.assertEqual(record["sender_email"], "sender@example.com")
+        self.assertEqual(record["payer_email"], "payer@example.com")
+        self.assertEqual(record["payer_phone"], "(916) 555-1212")
+
+    def test_payer_display_uses_name_then_email_then_phone(self):
+        self.assertEqual(
+            payment_history.payer_display(
+                {
+                    "name": "Maria Lopez",
+                    "payer_email": "payer@example.com",
+                    "payer_phone": "(916) 555-1212",
+                    "sender_email": "hello@voguecleaners.co",
+                }
+            ),
+            "Maria Lopez",
+        )
+        self.assertEqual(
+            payment_history.payer_display(
+                {
+                    "name": "Unknown sender",
+                    "payer_email": "payer@example.com",
+                    "payer_phone": "(916) 555-1212",
+                }
+            ),
+            "payer@example.com",
+        )
+        self.assertEqual(
+            payment_history.payer_display(
+                {"name": "Unknown sender", "payer_phone": "(916) 555-1212"}
+            ),
+            "(916) 555-1212",
+        )
+        self.assertEqual(
+            payment_history.payer_display(
+                {
+                    "name": "Unknown sender",
+                    "sender_email": "hello@voguecleaners.co",
+                }
+            ),
+            "Unknown sender",
+        )
 
     def test_backfill_state_is_persisted(self):
         state_path = str(Path(self.temp_dir.name) / "backfill.json")

@@ -47,7 +47,26 @@ def load(path=HISTORY_FILE):
         return _read_unlocked(path)
 
 
-def _add_unlocked(name, amount, received_at, path, source_id, sender_email):
+def payer_display(record):
+    name = (record.get("name") or "").strip()
+    if name and name != "Unknown sender":
+        return name
+    return (
+        record.get("payer_email")
+        or record.get("payer_phone")
+        or "Unknown sender"
+    )
+
+
+def _add_unlocked(
+    name,
+    amount,
+    received_at,
+    path,
+    source_id,
+    payer_email,
+    payer_phone,
+):
     record = {
         "received_at": received_at or datetime.now().astimezone().isoformat(timespec="seconds"),
         "name": (name or "Unknown sender").strip(),
@@ -55,8 +74,10 @@ def _add_unlocked(name, amount, received_at, path, source_id, sender_email):
     }
     if source_id is not None:
         record["source_id"] = str(source_id)
-    if sender_email:
-        record["sender_email"] = str(sender_email).strip()
+    if payer_email:
+        record["payer_email"] = str(payer_email).strip()
+    if payer_phone:
+        record["payer_phone"] = str(payer_phone).strip()
 
     records = _read_unlocked(path)
     if source_id is not None:
@@ -70,9 +91,10 @@ def _add_unlocked(name, amount, received_at, path, source_id, sender_email):
                 ):
                     existing["name"] = record["name"]
                     changed = True
-                if record.get("sender_email") and not existing.get("sender_email"):
-                    existing["sender_email"] = record["sender_email"]
-                    changed = True
+                for field in ("payer_email", "payer_phone"):
+                    if record.get(field) and not existing.get(field):
+                        existing[field] = record[field]
+                        changed = True
                 if (
                     existing.get("amount") in (None, "", "Unknown amount")
                     and record["amount"] != "Unknown amount"
@@ -93,7 +115,8 @@ def add(
     received_at=None,
     path=HISTORY_FILE,
     source_id=None,
-    sender_email=None,
+    payer_email=None,
+    payer_phone=None,
 ):
     with _LOCK:
         record, _ = _add_unlocked(
@@ -102,7 +125,8 @@ def add(
             received_at,
             path,
             source_id,
-            sender_email,
+            payer_email,
+            payer_phone,
         )
     return record
 
@@ -113,7 +137,8 @@ def add_if_new(
     received_at=None,
     source_id=None,
     path=HISTORY_FILE,
-    sender_email=None,
+    payer_email=None,
+    payer_phone=None,
 ):
     with _LOCK:
         _, inserted = _add_unlocked(
@@ -122,7 +147,8 @@ def add_if_new(
             received_at,
             path,
             source_id,
-            sender_email,
+            payer_email,
+            payer_phone,
         )
     return inserted
 
@@ -134,7 +160,7 @@ def _record_from_mapping(value):
         "name": (value.get("name") or "Unknown sender").strip(),
         "amount": (value.get("amount") or "Unknown amount").strip(),
     }
-    for field in ("source_id", "sender_email", "gmail_account"):
+    for field in ("source_id", "payer_email", "payer_phone", "gmail_account"):
         if value.get(field):
             record[field] = str(value[field]).strip()
     return record
@@ -145,7 +171,8 @@ def _merge_record(existing, incoming):
     for field, unknown in (
         ("name", "Unknown sender"),
         ("amount", "Unknown amount"),
-        ("sender_email", None),
+        ("payer_email", None),
+        ("payer_phone", None),
         ("gmail_account", None),
     ):
         if existing.get(field) in (None, "", unknown) and incoming.get(field):

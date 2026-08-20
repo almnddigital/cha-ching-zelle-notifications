@@ -52,10 +52,12 @@ def _on_payment(
     amount,
     received_at=None,
     source_id=None,
-    sender_email=None,
+    payer_email=None,
+    payer_phone=None,
     is_test=False,
 ):
     logging.info("Validated payment received")
+    payer = name or payer_email or payer_phone or "Unknown sender"
     if not is_test:
         try:
             inserted = payment_history.add_if_new(
@@ -63,7 +65,8 @@ def _on_payment(
                 amount,
                 received_at=received_at,
                 source_id=source_id,
-                sender_email=sender_email,
+                payer_email=payer_email,
+                payer_phone=payer_phone,
             )
         except Exception:
             logging.exception("Could not save payment history")
@@ -71,9 +74,9 @@ def _on_payment(
             if not inserted:
                 logging.info("Duplicate payment notification suppressed")
                 return
-    notify.announce(name, amount)
+    notify.announce(payer, amount)
     if _app:
-        _app.after(0, lambda: notify.show_popup(_app, name, amount))
+        _app.after(0, lambda: notify.show_popup(_app, payer, amount))
 
 
 def _on_status(status):

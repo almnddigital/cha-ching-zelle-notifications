@@ -46,10 +46,33 @@ SUBJECT_PATTERNS = [
     re.compile(r"^(.+?)\s+sent you\s+(\$[\d,]+(?:\.\d{1,2})?)\s+with\s+zelle", re.IGNORECASE),
 ]
 
+EMAIL_VALUE = r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}"
+PHONE_VALUE = r"(?:\+?1[\s().-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}"
+NAME_VALUE = r"[A-Z][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5}"
+
 BODY_NAME_PATTERNS = [
-    re.compile(r"([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})\s+sent you money", re.IGNORECASE),
-    re.compile(r"([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})\s+sent you\s+\$", re.IGNORECASE),
-    re.compile(r"(?:sender|from)\s*:?\s*([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})(?=\s+(?:amount|memo|sent)|\s*\$)", re.IGNORECASE),
+    re.compile(rf"(?<![@.\w])({NAME_VALUE})\s+sent you money", re.IGNORECASE),
+    re.compile(rf"(?<![@.\w])({NAME_VALUE})\s+sent you\s+\$", re.IGNORECASE),
+    re.compile(
+        rf"(?:sender|from)\s*:?\s*({NAME_VALUE})(?=\s+(?:amount|memo|sent)|\s*\$)",
+        re.IGNORECASE,
+    ),
+]
+
+BODY_EMAIL_PATTERNS = [
+    re.compile(rf"({EMAIL_VALUE})\s+sent you(?: money|\s+\$)", re.IGNORECASE),
+    re.compile(
+        rf"(?:sender email|email address|sent by|from)\s*:?\s*({EMAIL_VALUE})",
+        re.IGNORECASE,
+    ),
+]
+
+BODY_PHONE_PATTERNS = [
+    re.compile(rf"({PHONE_VALUE})\s+sent you(?: money|\s+\$)", re.IGNORECASE),
+    re.compile(
+        rf"(?:sender phone|phone number|mobile number|sent by|from)\s*:?\s*({PHONE_VALUE})",
+        re.IGNORECASE,
+    ),
 ]
 
 BODY_AMOUNT_PATTERNS = [
@@ -58,10 +81,20 @@ BODY_AMOUNT_PATTERNS = [
     re.compile(r"payment(?: of| for)?[\s\S]{0,80}?\$([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE),
 ]
 ZELLE_MARKER_PATTERN = re.compile(r"\bzelle(?:®)?\b", re.IGNORECASE)
-PAYMENT_EVENT_PATTERN = re.compile(
-    r"(?:sent you(?: money|\s+\$)|you(?:'ve| have)? received(?: money|\s+\$)|payment received|paid you)",
-    re.IGNORECASE,
-)
+BODY_PAYMENT_EVENT_PATTERNS = [
+    re.compile(
+        rf"(?:{NAME_VALUE}|{EMAIL_VALUE}|{PHONE_VALUE})\s+sent you(?: money|\s+\$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"you(?:'ve| have)? received(?: money|\s+\$[\d,]+(?:\.\d{{1,2}})?)[\s\S]{{0,160}}?from\s+(?:{NAME_VALUE}|{EMAIL_VALUE}|{PHONE_VALUE})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"payment received[\s\S]{{0,300}}?(?:sender|from)\s*:?\s*(?:{NAME_VALUE}|{EMAIL_VALUE}|{PHONE_VALUE})[\s\S]{{0,120}}?amount\s*:?\s*\$",
+        re.IGNORECASE,
+    ),
+]
 BACKFILL_YEARS = {"1 year": 1, "2 years": 2}
 BACKFILL_RETRIES = 3
 IMAP_RETRY_ERRORS = (imaplib.IMAP4.abort, OSError, socket.timeout)
@@ -95,7 +128,10 @@ def _is_valid_payment(subject, domain, body_text, amount):
     if not amount or not _is_zelle(subject, domain, body_text):
         return False
     _, subject_amount = _parse_subject(subject)
-    return bool(subject_amount or PAYMENT_EVENT_PATTERN.search(body_text))
+    return bool(
+        subject_amount
+        or any(pattern.search(body_text) for pattern in BODY_PAYMENT_EVENT_PATTERNS)
+    )
 
 
 def _decode_text(value):
@@ -140,6 +176,29 @@ def _envelope_sender_email(env):
     if mailbox and host:
         return f"{mailbox}@{host}"
     return None
+
+
+def _classify_payer_identity(value):
+    identity = (value or "").strip().strip(".,;:")
+    if not identity:
+        return None, None, None
+    if re.fullmatch(EMAIL_VALUE, identity, re.IGNORECASE):
+        return None, identity, None
+    if re.fullmatch(PHONE_VALUE, identity, re.IGNORECASE):
+        return None, None, identity
+    return identity, None, None
+
+
+def _exclude_notification_email(payer_email, env, gmail):
+    if not payer_email:
+        return None
+    normalized = payer_email.strip().lower()
+    excluded = {
+        value.strip().lower()
+        for value in (_envelope_sender_email(env), gmail)
+        if value and value.strip()
+    }
+    return None if normalized in excluded else payer_email.strip()
 
 
 def _parse_subject(subject):
@@ -187,10 +246,12 @@ def _extract_text(raw_bytes):
 def _parse_body(raw_bytes):
     text = _extract_text(raw_bytes)
     name = None
+    payer_email = None
+    payer_phone = None
     for p in BODY_NAME_PATTERNS:
         m = p.search(text)
         if m:
-            name = m.group(1).strip()
+            name, payer_email, payer_phone = _classify_payer_identity(m.group(1))
             break
     amount = None
     for pattern in BODY_AMOUNT_PATTERNS:
@@ -198,20 +259,33 @@ def _parse_body(raw_bytes):
         if m:
             amount = "$" + m.group(1)
             break
-    return name, amount, text
+    for pattern in BODY_EMAIL_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            payer_email = payer_email or m.group(1).strip()
+            break
+    for pattern in BODY_PHONE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            payer_phone = payer_phone or m.group(1).strip()
+            break
+    return name, amount, text, payer_email, payer_phone
 
 
 def _parse_envelope(env, raw_bytes=None):
     subject = _decode_header_text(env.subject)
-    name, amount = _parse_subject(subject)
+    identity, amount = _parse_subject(subject)
+    name, payer_email, payer_phone = _classify_payer_identity(identity)
     body_text = ""
     if (not name or not amount) and raw_bytes:
-        body_name, body_amount, body_text = _parse_body(raw_bytes)
+        body_name, body_amount, body_text, body_email, body_phone = _parse_body(raw_bytes)
         name = name or body_name
         amount = amount or body_amount
+        payer_email = payer_email or body_email
+        payer_phone = payer_phone or body_phone
     elif raw_bytes:
         body_text = _extract_text(raw_bytes)
-    return name, amount, body_text
+    return name, amount, body_text, payer_email, payer_phone
 
 
 def _uid_validity(folder_info):
@@ -304,24 +378,24 @@ class Monitor:
         if not _is_candidate(subject, domain):
             return
 
-        name, amount, body_text = _parse_envelope(env)
+        name, amount, body_text, payer_email, payer_phone = _parse_envelope(env)
         if not amount or not _is_zelle(subject, domain, body_text):
             body_data = client.fetch([uid], ["BODY[]"])
             raw = body_data[uid].get(b"BODY[]")
-            name, amount, body_text = _parse_envelope(env, raw)
+            name, amount, body_text, payer_email, payer_phone = _parse_envelope(env, raw)
         if not _is_valid_payment(subject, domain, body_text, amount):
             logging.info("UID %s: rejected bank notification", uid)
             return
 
-        sender_email = _envelope_sender_email(env)
-        name = name or sender_email
+        payer_email = _exclude_notification_email(payer_email, env, self.gmail)
         logging.info("UID %s: validated Zelle payment", uid)
         self.on_payment(
             name,
             amount,
             _envelope_received_at(env),
             _source_id(self.gmail, uid_validity, uid),
-            sender_email,
+            payer_email,
+            payer_phone,
         )
 
     def _run(self):
@@ -443,18 +517,17 @@ def fetch_historical_payments(
                 if not _is_candidate(subject, domain):
                     continue
 
-                name, amount, body_text = _parse_envelope(env)
-                sender_email = _envelope_sender_email(env)
+                name, amount, body_text, payer_email, payer_phone = _parse_envelope(env)
                 if not amount or not _is_zelle(subject, domain, body_text):
                     body_data = retry(
                         lambda: client.fetch([uid], ["BODY[]"]),
                         f"body uid {uid}",
                     )
                     raw = body_data[uid].get(b"BODY[]")
-                    name, amount, body_text = _parse_envelope(env, raw)
+                    name, amount, body_text, payer_email, payer_phone = _parse_envelope(env, raw)
                 if not _is_valid_payment(subject, domain, body_text, amount):
                     continue
-                name = name or sender_email
+                payer_email = _exclude_notification_email(payer_email, env, gmail)
 
                 records.append(
                     {
@@ -462,7 +535,8 @@ def fetch_historical_payments(
                         "amount": amount,
                         "received_at": _envelope_received_at(env),
                         "source_id": _source_id(gmail, uid_validity, uid),
-                        "sender_email": sender_email,
+                        "payer_email": payer_email,
+                        "payer_phone": payer_phone,
                         "gmail_account": gmail.strip().lower(),
                     }
                 )

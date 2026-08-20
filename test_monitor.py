@@ -64,8 +64,9 @@ class FakeIMAPClient:
             ),
             4: FakeEnvelope(
                 "Your Chase credit card statement is ready",
-                "notifications.chase.com",
+                "chase.com",
                 datetime(2026, 8, 13, 16, 33, tzinfo=timezone.utc),
+                mailbox="no.reply.alerts",
             ),
         }
         if fields == ["ENVELOPE"]:
@@ -101,11 +102,12 @@ class MonitorBackfillTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["name"], "Maria Lopez")
         self.assertEqual(records[0]["amount"], "$45.00")
-        self.assertEqual(
-            records[0]["sender_email"], "sender@notifications.chase.com"
-        )
+        self.assertNotIn("sender_email", records[0])
+        self.assertIsNone(records[0]["payer_email"])
+        self.assertIsNone(records[0]["payer_phone"])
         self.assertEqual(records[1]["amount"], "$30.00")
         self.assertEqual(records[1]["source_id"], "gmail:gmail:42:3")
+        self.assertTrue(all(record["amount"] != "Unknown amount" for record in records))
 
     def test_max_backfill_searches_for_zelle_text(self):
         monitor.fetch_historical_payments("gmail", "password", "Max")
@@ -118,6 +120,85 @@ class MonitorBackfillTests(unittest.TestCase):
                 "Your statement is ready",
                 "notifications.chase.com",
                 "Balance $300.00",
+            )
+        )
+
+    def test_generic_chase_alert_is_not_a_zelle_payment(self):
+        self.assertFalse(
+            monitor._is_valid_payment(
+                "Payment received",
+                "chase.com",
+                "Your credit card payment was received. Amount $300.00. Use Zelle to send money.",
+                "$300.00",
+            )
+        )
+
+    def test_payment_without_an_amount_is_rejected(self):
+        self.assertFalse(
+            monitor._is_valid_payment(
+                "Zelle payment received",
+                "chase.com",
+                "Maria Lopez sent you money with Zelle.",
+                None,
+            )
+        )
+
+    def test_payer_email_is_extracted_from_payment_text(self):
+        env = FakeEnvelope(
+            "Payment received",
+            "chase.com",
+            datetime(2026, 8, 13, 16, 34, tzinfo=timezone.utc),
+            mailbox="no.reply.alerts",
+        )
+
+        name, amount, body, payer_email, payer_phone = monitor._parse_envelope(
+            env,
+            b"payer@example.com sent you money with Zelle. Amount $25.00",
+        )
+
+        self.assertIsNone(name)
+        self.assertEqual(amount, "$25.00")
+        self.assertIn("Zelle", body)
+        self.assertEqual(payer_email, "payer@example.com")
+        self.assertIsNone(payer_phone)
+
+    def test_payer_phone_is_extracted_when_name_and_email_are_missing(self):
+        env = FakeEnvelope(
+            "Payment received",
+            "chase.com",
+            datetime(2026, 8, 13, 16, 35, tzinfo=timezone.utc),
+        )
+
+        name, amount, _, payer_email, payer_phone = monitor._parse_envelope(
+            env,
+            b"(916) 555-1212 sent you money with Zelle. Amount $40.00",
+        )
+
+        self.assertIsNone(name)
+        self.assertEqual(amount, "$40.00")
+        self.assertIsNone(payer_email)
+        self.assertEqual(payer_phone, "(916) 555-1212")
+
+    def test_notification_or_monitored_email_cannot_be_the_payer(self):
+        env = FakeEnvelope(
+            "Payment received",
+            "voguecleaners.co",
+            datetime(2026, 8, 13, 16, 36, tzinfo=timezone.utc),
+            mailbox="hello",
+        )
+
+        self.assertIsNone(
+            monitor._exclude_notification_email(
+                "hello@voguecleaners.co",
+                env,
+                "recipient@example.com",
+            )
+        )
+        self.assertIsNone(
+            monitor._exclude_notification_email(
+                "recipient@example.com",
+                env,
+                "recipient@example.com",
             )
         )
 

@@ -207,11 +207,7 @@ def _format_history_date(value):
 
 
 def _format_history_sender(record):
-    name = record.get("name") or "Unknown sender"
-    email = record.get("sender_email")
-    if email and email.lower() != name.lower():
-        return f"{name} — {email}"
-    return name
+    return payment_history.payer_display(record)
 
 
 class HistoryWindow(ctk.CTkToplevel):
@@ -290,7 +286,7 @@ class HistoryWindow(ctk.CTkToplevel):
             selectmode="browse",
         )
         self._rows.heading("date", text="DATE")
-        self._rows.heading("sender", text="PAYER / NOTIFICATION EMAIL")
+        self._rows.heading("sender", text="PAYER")
         self._rows.heading("amount", text="AMOUNT")
         self._rows.column("date", width=175, minwidth=150, anchor="w")
         self._rows.column("sender", width=330, minwidth=220, anchor="w")
@@ -406,7 +402,13 @@ class HistoryWindow(ctk.CTkToplevel):
                 if query
                 in " ".join(
                     str(record.get(field, ""))
-                    for field in ("name", "sender_email", "amount", "received_at")
+                    for field in (
+                        "name",
+                        "payer_email",
+                        "payer_phone",
+                        "amount",
+                        "received_at",
+                    )
                 ).casefold()
             ]
         else:
