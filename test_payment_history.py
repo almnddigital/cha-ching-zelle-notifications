@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -24,8 +23,7 @@ class PaymentHistoryTests(unittest.TestCase):
         self.assertEqual([record["name"] for record in records], ["Jon Kim", "Maria Lopez"])
         self.assertEqual(payment_history.total_amount(records), Decimal("1245.50"))
 
-        with open(self.path, encoding="utf-8") as f:
-            self.assertIsInstance(json.load(f), list)
+        self.assertIsInstance(payment_history.load(self.path), list)
 
     def test_missing_values_are_visible(self):
         payment_history.add(None, None, path=self.path)
