@@ -90,6 +90,54 @@ class PaymentHistoryTests(unittest.TestCase):
             6,
         )
 
+    def test_bulk_import_writes_all_records_once(self):
+        inserted = payment_history.add_many(
+            [
+                {
+                    "name": "Maria Lopez",
+                    "amount": "$45.00",
+                    "received_at": "2026-08-13T09:30:00-07:00",
+                    "source_id": "gmail:account:42:1",
+                },
+                {
+                    "name": "Jon Kim",
+                    "amount": "$30.00",
+                    "received_at": "2026-08-13T10:00:00-07:00",
+                    "source_id": "gmail:account:42:2",
+                },
+            ],
+            self.path,
+        )
+
+        self.assertEqual(inserted, 2)
+        self.assertEqual(len(payment_history.load(self.path)), 2)
+
+    def test_rebuild_replaces_old_gmail_records(self):
+        payment_history.add("Manual", "$5.00", path=self.path, source_id="manual:1")
+        payment_history.add("False positive", "$300.00", path=self.path, source_id="gmail:old")
+
+        payment_history.replace_gmail_records(
+            [
+                {
+                    "name": "Maria Lopez",
+                    "amount": "$45.00",
+                    "source_id": "gmail:account:42:1",
+                }
+            ],
+            self.path,
+        )
+
+        records = payment_history.load(self.path)
+        self.assertEqual({record["name"] for record in records}, {"Manual", "Maria Lopez"})
+
+    def test_corrupt_history_fails_closed(self):
+        Path(self.path).write_text("not json", encoding="utf-8")
+
+        with self.assertRaises(payment_history.HistoryReadError):
+            payment_history.add("Maria", "$45.00", path=self.path)
+
+        self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "not json")
+
 
 if __name__ == "__main__":
     unittest.main()

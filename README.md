@@ -18,7 +18,16 @@ The Cha-Ching Payment Notifications icon appears in the taskbar tray (bottom-rig
 - **Yellow bell** = reconnecting (brief)
 - **Gray bell** = stopped
 
-Right-click the tray icon to access **Settings**, **Test Announcement**, or **Exit**.
+Right-click the tray icon to access **Settings**, **Payment History**, **Test Announcement**, **Check for Updates**, or **Exit**.
+
+When an update is available, click **Update now**. Cha-Ching verifies the release checksum, keeps a backup of the current EXE, installs the update, and restarts itself.
+
+### Payment history
+
+- History is encrypted for the current Windows user.
+- Search by payer, notification email, amount, or date.
+- Use Previous and Next to move through 100-record pages.
+- After upgrading from an older release, open Payment History and click **Rebuild history** once to remove old false-positive bank notifications.
 
 ---
 
@@ -57,7 +66,12 @@ pip install -r requirements.txt
 build.bat
 ```
 
-Output: `dist\ChaChing.exe`
+Output:
+
+- `dist\ChaChing.exe`
+- `dist\ChaChing.exe.sha256`
+
+To make one-click updates available, create a GitHub release whose tag matches `APP_VERSION` in `version.py`, then upload both output files plus `install-chaching.ps1` and `install.bat`. Do not publish the EXE without its matching checksum.
 
 ---
 
@@ -67,6 +81,7 @@ Output: `dist\ChaChing.exe`
 |---|---|
 | "Test Connection" fails | Wrong email or App Password, or IMAP not enabled in Gmail |
 | No sound plays | Check Windows volume / audio output is connected |
-| Wrong name announced | Share the Zelle email subject line to tune the parser |
+| Wrong name announced | Share a redacted Zelle email subject/body sample to tune the parser |
 | Doesn't auto-start | Add a shortcut to `shell:startup` folder |
 | Tray icon is yellow | Reconnecting — wait a few seconds, it auto-recovers |
+| Update is not offered | Confirm the latest GitHub release has both `ChaChing.exe` and `ChaChing.exe.sha256` |

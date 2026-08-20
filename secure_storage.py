@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shutil
 import tempfile
 
 
@@ -48,7 +49,7 @@ def _encrypted_payload(data):
     }
 
 
-def save_json(path, data):
+def save_json(path, data, create_backup=True):
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     payload = _encrypted_payload(data) if os.name == "nt" else data
@@ -56,6 +57,8 @@ def save_json(path, data):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        if create_backup and os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
         os.replace(temp_path, path)
     except Exception:
         try:
@@ -76,5 +79,5 @@ def load_json(path, default=None):
         return json.loads(_unprotect(encrypted))
 
     if os.name == "nt":
-        save_json(path, payload)
+        save_json(path, payload, create_backup=False)
     return payload

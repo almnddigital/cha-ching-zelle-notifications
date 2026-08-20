@@ -14,18 +14,28 @@ _LOCK = threading.Lock()
 _AMOUNT_PATTERN = re.compile(r"^\$([\d,]+(?:\.\d{1,2})?)$")
 
 
-def _read_json_unlocked(path):
+class HistoryReadError(RuntimeError):
+    pass
+
+
+def _read_json_unlocked(path, default=None):
     if not os.path.exists(path):
-        return []
+        return default
     try:
         return secure_storage.load_json(path)
-    except (OSError, ValueError, TypeError, RuntimeError):
-        return []
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        raise HistoryReadError(
+            f"Could not read {os.path.basename(path)}. The existing file was not changed."
+        ) from exc
 
 
 def _read_unlocked(path):
-    data = _read_json_unlocked(path)
-    return data if isinstance(data, list) else []
+    data = _read_json_unlocked(path, [])
+    if not isinstance(data, list):
+        raise HistoryReadError(
+            f"Could not read {os.path.basename(path)}. The existing file was not changed."
+        )
+    return data
 
 
 def _write_unlocked(path, records):
@@ -62,6 +72,12 @@ def _add_unlocked(name, amount, received_at, path, source_id, sender_email):
                     changed = True
                 if record.get("sender_email") and not existing.get("sender_email"):
                     existing["sender_email"] = record["sender_email"]
+                    changed = True
+                if (
+                    existing.get("amount") in (None, "", "Unknown amount")
+                    and record["amount"] != "Unknown amount"
+                ):
+                    existing["amount"] = record["amount"]
                     changed = True
                 if changed:
                     _write_unlocked(path, records)
@@ -111,19 +127,109 @@ def add_if_new(
     return inserted
 
 
+def _record_from_mapping(value):
+    record = {
+        "received_at": value.get("received_at")
+        or datetime.now().astimezone().isoformat(timespec="seconds"),
+        "name": (value.get("name") or "Unknown sender").strip(),
+        "amount": (value.get("amount") or "Unknown amount").strip(),
+    }
+    for field in ("source_id", "sender_email", "gmail_account"):
+        if value.get(field):
+            record[field] = str(value[field]).strip()
+    return record
+
+
+def _merge_record(existing, incoming):
+    changed = False
+    for field, unknown in (
+        ("name", "Unknown sender"),
+        ("amount", "Unknown amount"),
+        ("sender_email", None),
+        ("gmail_account", None),
+    ):
+        if existing.get(field) in (None, "", unknown) and incoming.get(field):
+            if incoming.get(field) != unknown:
+                existing[field] = incoming[field]
+                changed = True
+    return changed
+
+
+def add_many(values, path=HISTORY_FILE):
+    with _LOCK:
+        records = _read_unlocked(path)
+        by_source = {
+            record.get("source_id"): record
+            for record in records
+            if record.get("source_id")
+        }
+        inserted = 0
+        changed = False
+        for value in values:
+            incoming = _record_from_mapping(value)
+            source_id = incoming.get("source_id")
+            existing = by_source.get(source_id) if source_id else None
+            if existing:
+                changed = _merge_record(existing, incoming) or changed
+                continue
+            records.append(incoming)
+            if source_id:
+                by_source[source_id] = incoming
+            inserted += 1
+            changed = True
+        if changed:
+            records.sort(key=lambda record: record.get("received_at") or "", reverse=True)
+            _write_unlocked(path, records)
+    return inserted
+
+
+def replace_gmail_records(values, path=HISTORY_FILE):
+    replacements = [_record_from_mapping(value) for value in values]
+    with _LOCK:
+        records = [
+            record
+            for record in _read_unlocked(path)
+            if not str(record.get("source_id", "")).startswith("gmail:")
+        ]
+        records.extend(replacements)
+        records.sort(key=lambda record: record.get("received_at") or "", reverse=True)
+        _write_unlocked(path, records)
+    return len(replacements)
+
+
+def gmail_record_count(path=HISTORY_FILE):
+    with _LOCK:
+        return sum(
+            str(record.get("source_id", "")).startswith("gmail:")
+            for record in _read_unlocked(path)
+        )
+
+
 def load_backfill_state(path=BACKFILL_STATE_FILE):
     with _LOCK:
         data = _read_json_unlocked(path)
-    return data if isinstance(data, dict) else None
+    if data is not None and not isinstance(data, dict):
+        raise HistoryReadError(
+            f"Could not read {os.path.basename(path)}. The existing file was not changed."
+        )
+    return data
 
 
-def mark_backfill_complete(length, scanned_count, imported_count, path=BACKFILL_STATE_FILE):
+def mark_backfill_complete(
+    length,
+    scanned_count,
+    imported_count,
+    path=BACKFILL_STATE_FILE,
+    gmail_account=None,
+):
     state = {
         "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "length": length,
         "scanned_count": scanned_count,
         "imported_count": imported_count,
     }
+    if gmail_account:
+        state["gmail_account"] = gmail_account.strip().lower()
     with _LOCK:
         _write_unlocked(path, state)
 

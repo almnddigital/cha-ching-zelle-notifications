@@ -197,7 +197,29 @@ def show_update_error(master):
     ).pack(pady=(28, 10))
     ctk.CTkLabel(
         popup,
-        text="Please try again later or run install.bat manually.",
+        text="The current app is still installed. Please try again later.",
         text_color="#d1d5db",
+    ).pack(pady=(0, 20))
+    ctk.CTkButton(popup, text="Close", width=120, command=popup.destroy).pack()
+
+
+def show_update_status(master, title, message, is_error=False):
+    popup = ctk.CTkToplevel(master)
+    popup.title(title)
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.geometry("420x190")
+    ctk.CTkLabel(
+        popup,
+        text=title,
+        font=ctk.CTkFont(size=16, weight="bold"),
+        text_color="#ef4444" if is_error else "#22c55e",
+    ).pack(pady=(28, 10))
+    ctk.CTkLabel(
+        popup,
+        text=message,
+        text_color="#d1d5db",
+        wraplength=360,
+        justify="center",
     ).pack(pady=(0, 20))
     ctk.CTkButton(popup, text="Close", width=120, command=popup.destroy).pack()

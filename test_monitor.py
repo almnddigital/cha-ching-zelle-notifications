@@ -1,4 +1,5 @@
 import sys
+import threading
 import types
 import unittest
 from datetime import datetime, timezone
@@ -35,13 +36,14 @@ class FakeIMAPClient:
 
     def select_folder(self, folder):
         self.folder = folder
+        return {b"UIDVALIDITY": 42}
 
     def logout(self):
         pass
 
     def search(self, criteria):
         FakeIMAPClient.last_search = criteria
-        return [1, 2, 3]
+        return [1, 2, 3, 4]
 
     def fetch(self, uids, fields):
         envelopes = {
@@ -60,11 +62,20 @@ class FakeIMAPClient:
                 "notifications.chase.com",
                 datetime(2026, 8, 13, 16, 32, tzinfo=timezone.utc),
             ),
+            4: FakeEnvelope(
+                "Your Chase credit card statement is ready",
+                "notifications.chase.com",
+                datetime(2026, 8, 13, 16, 33, tzinfo=timezone.utc),
+            ),
         }
         if fields == ["ENVELOPE"]:
             return {uid: {b"ENVELOPE": envelopes[uid]} for uid in uids}
         if fields == ["BODY[]"]:
-            return {3: {b"BODY[]": b"Maria Lopez sent you money. Amount $30.00"}}
+            bodies = {
+                3: b"Maria Lopez sent you money with Zelle. Amount $30.00",
+                4: b"Your payment due is $300.00. Use Zelle to send money securely.",
+            }
+            return {uid: {b"BODY[]": bodies[uid]} for uid in uids}
         raise AssertionError(fields)
 
 
@@ -94,12 +105,65 @@ class MonitorBackfillTests(unittest.TestCase):
             records[0]["sender_email"], "sender@notifications.chase.com"
         )
         self.assertEqual(records[1]["amount"], "$30.00")
-        self.assertEqual(records[1]["source_id"], "gmail:3")
+        self.assertEqual(records[1]["source_id"], "gmail:gmail:42:3")
 
-    def test_max_backfill_searches_all_mail(self):
+    def test_max_backfill_searches_for_zelle_text(self):
         monitor.fetch_historical_payments("gmail", "password", "Max")
 
-        self.assertEqual(FakeIMAPClient.last_search, ["ALL"])
+        self.assertEqual(FakeIMAPClient.last_search, ["TEXT", "Zelle"])
+
+    def test_bank_domain_without_zelle_marker_is_rejected(self):
+        self.assertFalse(
+            monitor._is_zelle(
+                "Your statement is ready",
+                "notifications.chase.com",
+                "Balance $300.00",
+            )
+        )
+
+    def test_domain_matching_requires_a_real_domain_boundary(self):
+        self.assertFalse(monitor._trusted_sender("fakechase.com"))
+        self.assertTrue(monitor._trusted_sender("email.notifications.chase.com"))
+
+    def test_encoded_subject_is_decoded(self):
+        encoded = "=?UTF-8?Q?Received_=2445.00_from_Mar=C3=ADa_with_Zelle?="
+        self.assertIn("María", monitor._decode_header_text(encoded))
+
+    def test_cursor_resumes_only_for_the_same_account_and_mailbox(self):
+        cursor = {"gmail": "store@example.com", "uid_validity": 42, "last_uid": 16802}
+
+        self.assertEqual(
+            monitor._cursor_last_uid(cursor, "store@example.com", 42),
+            16802,
+        )
+        self.assertIsNone(monitor._cursor_last_uid(cursor, "other@example.com", 42))
+        self.assertIsNone(monitor._cursor_last_uid(cursor, "store@example.com", 43))
+
+    def test_backfill_can_be_cancelled_without_returning_partial_records(self):
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        with self.assertRaises(monitor.BackfillCancelled):
+            monitor.fetch_historical_payments(
+                "gmail",
+                "password",
+                "Max",
+                cancel_event=cancel_event,
+            )
+
+    def test_backfill_reports_progress(self):
+        progress = []
+
+        monitor.fetch_historical_payments(
+            "gmail",
+            "password",
+            "Max",
+            on_progress=lambda scanned, total, validated: progress.append(
+                (scanned, total, validated)
+            ),
+        )
+
+        self.assertEqual(progress[-1], (4, 4, 2))
 
     def test_backfill_reconnects_after_connection_drop(self):
         RetryingIMAPClient.failures_remaining = 1

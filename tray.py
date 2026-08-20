@@ -30,10 +30,18 @@ ICONS = {
 
 
 class Tray:
-    def __init__(self, on_open_settings, on_open_history, on_test, on_exit):
+    def __init__(
+        self,
+        on_open_settings,
+        on_open_history,
+        on_test,
+        on_check_updates,
+        on_exit,
+    ):
         self.on_open_settings = on_open_settings
         self.on_open_history = on_open_history
         self.on_test = on_test
+        self.on_check_updates = on_check_updates
         self.on_exit = on_exit
         self._icon = None
 
@@ -44,14 +52,15 @@ class Tray:
             pystray.MenuItem("Settings", lambda: self.on_open_settings()),
             pystray.MenuItem("Payment History", lambda: self.on_open_history()),
             pystray.MenuItem("Send Test Announcement", lambda: self.on_test()),
+            pystray.MenuItem("Check for Updates", lambda: self.on_check_updates()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", lambda: self._do_exit()),
         )
 
     def _do_exit(self):
-        self.on_exit()
         if self._icon:
             self._icon.stop()
+        self.on_exit()
 
     def start(self):
         self._icon = pystray.Icon(

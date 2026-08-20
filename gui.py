@@ -8,6 +8,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime
+from tkinter import ttk
 
 import customtkinter as ctk
 
@@ -25,7 +26,7 @@ ctk.set_default_color_theme("blue")
 
 
 class SetupWindow(ctk.CTkToplevel):
-    def __init__(self, master, on_save, existing_config=None):
+    def __init__(self, master, on_save, existing_config=None, startup_error=None):
         super().__init__(master)
         self.on_save = on_save
         self.title("Cha-Ching Payment Notifications — Setup")
@@ -34,6 +35,8 @@ class SetupWindow(ctk.CTkToplevel):
         self.lift()
         self.focus_force()
         self._build(existing_config or {})
+        if startup_error:
+            self._set_status(startup_error, "#ef4444")
 
     def _build(self, cfg):
         pad = {"padx": 32, "pady": 6}
@@ -207,7 +210,7 @@ def _format_history_sender(record):
     name = record.get("name") or "Unknown sender"
     email = record.get("sender_email")
     if email and email.lower() != name.lower():
-        return f"{name}\n{email}"
+        return f"{name} — {email}"
     return name
 
 
@@ -217,10 +220,12 @@ class HistoryWindow(ctk.CTkToplevel):
         self.withdraw()
         self._on_backfill = on_backfill
         self._backfill_running = False
+        self._backfill_cancel = threading.Event()
         self._backfill_mode = "import"
         self._records = []
         self._filtered_records = []
         self._page = 0
+        self._history_error = None
         self.title("Payment History")
         self.geometry("680x620")
         self.minsize(560, 460)
@@ -258,8 +263,42 @@ class HistoryWindow(ctk.CTkToplevel):
         ).pack(side="right")
         self._search_entry.bind("<Return>", lambda _event: self._apply_search())
 
-        self._rows = ctk.CTkScrollableFrame(self, corner_radius=8)
-        self._rows.pack(fill="both", expand=True, padx=24, pady=(0, 14))
+        table = ctk.CTkFrame(self, corner_radius=8)
+        table.pack(fill="both", expand=True, padx=24, pady=(0, 14))
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(
+            "ChaChing.Treeview",
+            background="#111827",
+            fieldbackground="#111827",
+            foreground="#f3f4f6",
+            rowheight=32,
+            borderwidth=0,
+        )
+        style.configure(
+            "ChaChing.Treeview.Heading",
+            background="#1f2937",
+            foreground="#d1d5db",
+            relief="flat",
+        )
+        style.map("ChaChing.Treeview", background=[("selected", "#1d4ed8")])
+        self._rows = ttk.Treeview(
+            table,
+            columns=("date", "sender", "amount"),
+            show="headings",
+            style="ChaChing.Treeview",
+            selectmode="browse",
+        )
+        self._rows.heading("date", text="DATE")
+        self._rows.heading("sender", text="PAYER / NOTIFICATION EMAIL")
+        self._rows.heading("amount", text="AMOUNT")
+        self._rows.column("date", width=175, minwidth=150, anchor="w")
+        self._rows.column("sender", width=330, minwidth=220, anchor="w")
+        self._rows.column("amount", width=110, minwidth=90, anchor="e")
+        scrollbar = ctk.CTkScrollbar(table, command=self._rows.yview)
+        self._rows.configure(yscrollcommand=scrollbar.set)
+        self._rows.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side="right", fill="y", padx=(4, 8), pady=8)
 
         pagination_row = ctk.CTkFrame(self, fg_color="transparent")
         pagination_row.pack(fill="x", padx=24, pady=(0, 14))
@@ -288,13 +327,13 @@ class HistoryWindow(ctk.CTkToplevel):
         backfill_panel.pack(fill="x", padx=24, pady=(0, 14))
         ctk.CTkLabel(
             backfill_panel,
-            text="One-time Gmail import",
+            text="Gmail payment import",
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         ).pack(fill="x", padx=14, pady=(12, 2))
         ctk.CTkLabel(
             backfill_panel,
-            text="Import older Zelle payments without announcing them.",
+            text="Import, expand, or rebuild Zelle history without announcements.",
             text_color="#9ca3af",
             anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
@@ -342,8 +381,20 @@ class HistoryWindow(ctk.CTkToplevel):
         ).pack(side="right")
 
     def refresh(self):
-        self._records = payment_history.load()
-        self._update_backfill_controls()
+        try:
+            self._records = payment_history.load()
+            self._history_error = None
+            self._update_backfill_controls()
+        except payment_history.HistoryReadError as exc:
+            logging.exception("Could not load payment history")
+            self._records = []
+            self._history_error = str(exc)
+            self._backfill_picker.configure(state="disabled")
+            self._backfill_btn.configure(state="disabled", text="Unavailable")
+            self._backfill_status.configure(
+                text="History storage must be recovered before importing.",
+                text_color="#ef4444",
+            )
         self._apply_search()
 
     def _apply_search(self):
@@ -374,13 +425,18 @@ class HistoryWindow(ctk.CTkToplevel):
 
     def _render_rows(self):
         total = payment_history.total_amount(self._filtered_records)
-        if len(self._filtered_records) == len(self._records):
+        if self._history_error:
+            summary = self._history_error
+            self._summary.configure(text_color="#ef4444")
+        elif len(self._filtered_records) == len(self._records):
             summary = f"{len(self._records)} payment(s)  •  Known total: ${total:,.2f}"
+            self._summary.configure(text_color="#9ca3af")
         else:
             summary = (
                 f"{len(self._filtered_records)} matching of {len(self._records)} payment(s)  "
                 f"•  Known total: ${total:,.2f}"
             )
+            self._summary.configure(text_color="#9ca3af")
         self._summary.configure(text=summary)
 
         page_count = max(
@@ -400,64 +456,49 @@ class HistoryWindow(ctk.CTkToplevel):
             state="normal" if self._page < page_count - 1 else "disabled"
         )
 
-        for child in self._rows.winfo_children():
-            child.destroy()
-
-        header = ctk.CTkFrame(self._rows, fg_color="#1f2937")
-        header.pack(fill="x", pady=(0, 6))
-        header.grid_columnconfigure(0, weight=1)
-        header.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(header, text="DATE", anchor="w").grid(
-            row=0, column=0, sticky="ew", padx=12, pady=8
-        )
-        ctk.CTkLabel(header, text="FROM", anchor="w").grid(
-            row=0, column=1, sticky="ew", padx=12, pady=8
-        )
-        ctk.CTkLabel(header, text="AMOUNT", anchor="e").grid(
-            row=0, column=2, sticky="e", padx=12, pady=8
-        )
+        children = self._rows.get_children()
+        if children:
+            self._rows.delete(*children)
 
         if not page_records:
-            ctk.CTkLabel(
-                self._rows,
-                text=(
+            self._rows.insert(
+                "",
+                "end",
+                values=(
+                    "",
                     "No matching payments."
                     if self._records and self._search_var.get().strip()
-                    else "No payments recorded yet."
+                    else self._history_error or "No payments recorded yet.",
+                    "",
                 ),
-                text_color="#9ca3af",
-            ).pack(pady=32)
+            )
             return
 
         for record in page_records:
-            row = ctk.CTkFrame(self._rows, fg_color="transparent")
-            row.pack(fill="x", pady=1)
-            row.grid_columnconfigure(0, weight=1)
-            row.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(
-                row,
-                text=_format_history_date(record.get("received_at")),
-                anchor="w",
-                text_color="#d1d5db",
-            ).grid(row=0, column=0, sticky="ew", padx=12, pady=7)
-            ctk.CTkLabel(
-                row,
-                text=_format_history_sender(record),
-                anchor="w",
-                text_color="#f3f4f6",
-                justify="left",
-                wraplength=240,
-            ).grid(row=0, column=1, sticky="ew", padx=12, pady=7)
-            ctk.CTkLabel(
-                row,
-                text=record.get("amount", "Unknown amount"),
-                anchor="e",
-                font=ctk.CTkFont(size=13, weight="bold"),
-                text_color="#22c55e",
-            ).grid(row=0, column=2, sticky="e", padx=12, pady=7)
+            self._rows.insert(
+                "",
+                "end",
+                values=(
+                    _format_history_date(record.get("received_at")),
+                    _format_history_sender(record),
+                    record.get("amount", "Unknown amount"),
+                ),
+            )
+
+    def _load_backfill_state(self):
+        state = payment_history.load_backfill_state()
+        if not state or not state.get("gmail_account"):
+            return state
+        try:
+            cfg = config.load() or {}
+        except config.ConfigReadError:
+            return state
+        if state["gmail_account"] != cfg.get("gmail", "").strip().lower():
+            return None
+        return state
 
     def _update_backfill_controls(self):
-        backfill_state = payment_history.load_backfill_state()
+        backfill_state = self._load_backfill_state()
         if backfill_state:
             saved_length = backfill_state.get("length", "1 year")
             self._backfill_length.set(saved_length)
@@ -469,7 +510,7 @@ class HistoryWindow(ctk.CTkToplevel):
                 text=(
                     "Completed once: "
                     f"{backfill_state.get('imported_count', 0)} payment(s) imported. "
-                    "Choose a longer range to expand history, or refresh senders."
+                    "Choose a longer range to expand history, or rebuild this range."
                 ),
                 text_color="#22c55e",
             )
@@ -477,12 +518,12 @@ class HistoryWindow(ctk.CTkToplevel):
             self._backfill_picker.configure(state="normal")
             self._backfill_btn.configure(state="normal", text="Import once")
             self._backfill_status.configure(
-                text="Choose a range. This import can only run once.",
+                text="Choose a range. You can expand or rebuild it later.",
                 text_color="#9ca3af",
             )
 
     def _backfill_selection_changed(self, _value=None):
-        backfill_state = payment_history.load_backfill_state()
+        backfill_state = self._load_backfill_state()
         if not backfill_state:
             self._backfill_btn.configure(text="Import once")
             return
@@ -491,12 +532,18 @@ class HistoryWindow(ctk.CTkToplevel):
         if BACKFILL_ORDER[selected] > BACKFILL_ORDER[current]:
             self._backfill_btn.configure(text="Expand history")
         else:
-            self._backfill_btn.configure(text="Refresh senders")
+            self._backfill_btn.configure(text="Rebuild history")
 
     def _start_backfill(self):
         if self._backfill_running:
+            self._backfill_cancel.set()
+            self._backfill_btn.configure(state="disabled", text="Cancelling...")
+            self._backfill_status.configure(
+                text="Cancelling after the current Gmail request...",
+                text_color="#f59e0b",
+            )
             return
-        backfill_state = payment_history.load_backfill_state()
+        backfill_state = self._load_backfill_state()
         selected_length = self._backfill_length.get()
         if backfill_state:
             current_length = backfill_state.get("length", "1 year")
@@ -509,19 +556,20 @@ class HistoryWindow(ctk.CTkToplevel):
             self._backfill_mode = (
                 "expand"
                 if BACKFILL_ORDER[selected_length] > BACKFILL_ORDER[current_length]
-                else "refresh"
+                else "rebuild"
             )
             length = selected_length
         else:
             self._backfill_mode = "import"
             length = selected_length
         self._backfill_running = True
+        self._backfill_cancel.clear()
         self._backfill_picker.configure(state="disabled")
-        self._backfill_btn.configure(state="disabled", text="Working...")
+        self._backfill_btn.configure(state="normal", text="Cancel")
         self._backfill_status.configure(
             text=(
-                "Refreshing sender details. This may take a while..."
-                if self._backfill_mode == "refresh"
+                "Revalidating Gmail history. Existing imported records will be replaced..."
+                if self._backfill_mode == "rebuild"
                 else "Expanding history. This may take a while..."
                 if self._backfill_mode == "expand"
                 else "Scanning Gmail. This may take a while..."
@@ -530,8 +578,25 @@ class HistoryWindow(ctk.CTkToplevel):
         )
 
         def run():
+            def progress(scanned, total, validated):
+                self.after(
+                    0,
+                    lambda: self._backfill_status.configure(
+                        text=(
+                            f"Scanned {scanned:,} of {total:,} Zelle-matching emails; "
+                            f"validated {validated:,} payment(s)..."
+                        ),
+                        text_color="#f59e0b",
+                    ),
+                )
+
             try:
-                matched_count, imported_count = self._on_backfill(length)
+                matched_count, imported_count = self._on_backfill(
+                    length,
+                    self._backfill_mode in ("rebuild", "expand"),
+                    progress,
+                    self._backfill_cancel,
+                )
             except Exception as exc:
                 self.after(0, lambda: self._backfill_failed(str(exc)))
                 return
@@ -549,11 +614,11 @@ class HistoryWindow(ctk.CTkToplevel):
         self._backfill_status.configure(
             text=(
                 (
-                    f"Sender details refreshed for {matched_count} matching email(s)."
-                    if mode == "refresh"
+                    f"History rebuilt with {imported_count} validated payment(s)."
+                    if mode == "rebuild"
                     else (
-                        f"History expanded: {imported_count} new payment(s) "
-                        f"from {matched_count} matching email(s)."
+                        f"History expanded and rebuilt with {imported_count} "
+                        "validated payment(s)."
                     )
                     if mode == "expand"
                     else (
@@ -581,13 +646,16 @@ class App(ctk.CTk):
         self._setup_win = None
         self._history_win = None
 
-    def open_settings(self, on_save, existing_config=None):
+    def open_settings(self, on_save, existing_config=None, startup_error=None):
         if self._setup_win and self._setup_win.winfo_exists():
             self._setup_win.lift()
             self._setup_win.focus_force()
             return
         self._setup_win = SetupWindow(
-            self, on_save=on_save, existing_config=existing_config
+            self,
+            on_save=on_save,
+            existing_config=existing_config,
+            startup_error=startup_error,
         )
 
     def open_history(self, on_backfill):

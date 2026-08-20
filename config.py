@@ -10,14 +10,25 @@ CONFIG_DIR = os.path.join(os.getenv("APPDATA", "."), "ChaChing")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
+class ConfigReadError(RuntimeError):
+    pass
+
+
 def load():
     """Returns config dict or None if not configured yet."""
     if not os.path.exists(CONFIG_FILE):
         return None
     try:
-        return secure_storage.load_json(CONFIG_FILE)
-    except Exception:
-        return None
+        data = secure_storage.load_json(CONFIG_FILE)
+    except Exception as exc:
+        raise ConfigReadError(
+            "Saved settings could not be decrypted. Re-enter them to replace the damaged file."
+        ) from exc
+    if not isinstance(data, dict):
+        raise ConfigReadError(
+            "Saved settings are invalid. Re-enter them to replace the damaged file."
+        )
+    return data
 
 
 def save(gmail, app_password, business_name=""):

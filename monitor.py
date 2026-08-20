@@ -10,6 +10,7 @@ Runs in a background thread. Auto-reconnects on connection drops.
 
 import imaplib
 import logging
+import os
 import re
 import socket
 import threading
@@ -17,14 +18,18 @@ import time
 import email as email_lib
 import html as html_lib
 from datetime import date, datetime, timedelta, timezone
+from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 
 from imapclient import IMAPClient
 
+import config
+import secure_storage
+
 IMAP_HOST = "imap.gmail.com"
 IDLE_TIMEOUT = 25 * 60  # 25 min — Gmail drops IDLE at ~30 min
 
-ZELLE_DOMAINS = [
+ZELLE_DOMAINS = {
     "zellepay.com",
     "notifications.chase.com",
     "alerts.bankofamerica.com",
@@ -34,28 +39,63 @@ ZELLE_DOMAINS = [
     "tdbank.com",
     "pnc.com",
     "chase.com",
-]
+}
 
 SUBJECT_PATTERNS = [
-    re.compile(r"received\s+(\$[\d,]+\.?\d*)\s+from\s+(.+?)\s+with\s+zelle", re.IGNORECASE),
-    re.compile(r"^(.+?)\s+sent you\s+(\$[\d,]+\.?\d*)\s+with\s+zelle", re.IGNORECASE),
+    re.compile(r"received\s+(\$[\d,]+(?:\.\d{1,2})?)\s+from\s+(.+?)\s+with\s+zelle", re.IGNORECASE),
+    re.compile(r"^(.+?)\s+sent you\s+(\$[\d,]+(?:\.\d{1,2})?)\s+with\s+zelle", re.IGNORECASE),
 ]
 
 BODY_NAME_PATTERNS = [
-    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you money"),
-    re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+sent you\s+\$"),
+    re.compile(r"([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})\s+sent you money", re.IGNORECASE),
+    re.compile(r"([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})\s+sent you\s+\$", re.IGNORECASE),
+    re.compile(r"(?:sender|from)\s*:?\s*([A-Z0-9][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5})(?=\s+(?:amount|memo|sent)|\s*\$)", re.IGNORECASE),
 ]
 
-BODY_AMOUNT_PATTERN = re.compile(r"Amount[\s\S]{0,300}?\$([\d,]+\.?\d{0,2})", re.IGNORECASE)
+BODY_AMOUNT_PATTERNS = [
+    re.compile(r"Amount[\s\S]{0,120}?\$([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE),
+    re.compile(r"sent you[\s\S]{0,80}?\$([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE),
+    re.compile(r"payment(?: of| for)?[\s\S]{0,80}?\$([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE),
+]
+ZELLE_MARKER_PATTERN = re.compile(r"\bzelle(?:®)?\b", re.IGNORECASE)
+PAYMENT_EVENT_PATTERN = re.compile(
+    r"(?:sent you(?: money|\s+\$)|you(?:'ve| have)? received(?: money|\s+\$)|payment received|paid you)",
+    re.IGNORECASE,
+)
 BACKFILL_YEARS = {"1 year": 1, "2 years": 2}
 BACKFILL_RETRIES = 3
 IMAP_RETRY_ERRORS = (imaplib.IMAP4.abort, OSError, socket.timeout)
+MONITOR_STATE_FILE = os.path.join(config.CONFIG_DIR, "monitor_state.json")
+_CURSOR_LOCK = threading.Lock()
 
 
-def _is_zelle(subject, domain):
-    if "zelle" in subject.lower():
-        return True
-    return any(d in domain.lower() for d in ZELLE_DOMAINS)
+class BackfillCancelled(RuntimeError):
+    pass
+
+
+def _trusted_sender(domain):
+    normalized = (domain or "").strip().lower().rstrip(".")
+    return any(
+        normalized == allowed or normalized.endswith("." + allowed)
+        for allowed in ZELLE_DOMAINS
+    )
+
+
+def _is_zelle(subject, domain, body_text=""):
+    return _trusted_sender(domain) and bool(
+        ZELLE_MARKER_PATTERN.search(f"{subject}\n{body_text}")
+    )
+
+
+def _is_candidate(subject, domain):
+    return _trusted_sender(domain) or bool(ZELLE_MARKER_PATTERN.search(subject))
+
+
+def _is_valid_payment(subject, domain, body_text, amount):
+    if not amount or not _is_zelle(subject, domain, body_text):
+        return False
+    _, subject_amount = _parse_subject(subject)
+    return bool(subject_amount or PAYMENT_EVENT_PATTERN.search(body_text))
 
 
 def _decode_text(value):
@@ -64,6 +104,14 @@ def _decode_text(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _decode_header_text(value):
+    raw = _decode_text(value)
+    try:
+        return str(make_header(decode_header(raw)))
+    except (LookupError, UnicodeError):
+        return raw
 
 
 def _envelope_received_at(env):
@@ -104,6 +152,17 @@ def _parse_subject(subject):
     return None, None
 
 
+def _decode_part(part):
+    payload = part.get_payload(decode=True)
+    if not payload:
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
 def _extract_text(raw_bytes):
     msg = email_lib.message_from_bytes(raw_bytes)
     text = ""
@@ -111,19 +170,17 @@ def _extract_text(raw_bytes):
         for part in msg.walk():
             ct = part.get_content_type()
             if ct == "text/plain":
-                text = part.get_payload(decode=True).decode("utf-8", errors="replace")
+                text = _decode_part(part)
                 break
             elif ct == "text/html" and not text:
-                html = part.get_payload(decode=True).decode("utf-8", errors="replace")
+                html = _decode_part(part)
                 text = re.sub(r"<[^>]+>", " ", html)
     else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            raw = payload.decode("utf-8", errors="replace")
-            if msg.get_content_type() == "text/html":
-                text = re.sub(r"<[^>]+>", " ", raw)
-            else:
-                text = raw
+        raw = _decode_part(msg)
+        if msg.get_content_type() == "text/html":
+            text = re.sub(r"<[^>]+>", " ", raw)
+        else:
+            text = raw
     return html_lib.unescape(re.sub(r"\s+", " ", text))
 
 
@@ -136,20 +193,68 @@ def _parse_body(raw_bytes):
             name = m.group(1).strip()
             break
     amount = None
-    m = BODY_AMOUNT_PATTERN.search(text)
-    if m:
-        amount = "$" + m.group(1)
-    return name, amount
+    for pattern in BODY_AMOUNT_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            amount = "$" + m.group(1)
+            break
+    return name, amount, text
 
 
 def _parse_envelope(env, raw_bytes=None):
-    subject = _decode_text(env.subject)
+    subject = _decode_header_text(env.subject)
     name, amount = _parse_subject(subject)
+    body_text = ""
     if (not name or not amount) and raw_bytes:
-        body_name, body_amount = _parse_body(raw_bytes)
+        body_name, body_amount, body_text = _parse_body(raw_bytes)
         name = name or body_name
         amount = amount or body_amount
-    return name, amount
+    elif raw_bytes:
+        body_text = _extract_text(raw_bytes)
+    return name, amount, body_text
+
+
+def _uid_validity(folder_info):
+    if not folder_info:
+        return 0
+    for key in (b"UIDVALIDITY", "UIDVALIDITY"):
+        if key in folder_info:
+            return int(folder_info[key])
+    return 0
+
+
+def _source_id(gmail, uid_validity, uid):
+    return f"gmail:{gmail.strip().lower()}:{uid_validity}:{uid}"
+
+
+def _load_cursor():
+    with _CURSOR_LOCK:
+        try:
+            state = secure_storage.load_json(MONITOR_STATE_FILE)
+        except Exception:
+            logging.exception("Could not read Gmail monitor cursor; starting a new baseline")
+            return None
+    return state if isinstance(state, dict) else None
+
+
+def _save_cursor(gmail, uid_validity, last_uid):
+    state = {
+        "gmail": gmail.strip().lower(),
+        "uid_validity": int(uid_validity),
+        "last_uid": int(last_uid),
+    }
+    with _CURSOR_LOCK:
+        secure_storage.save_json(MONITOR_STATE_FILE, state)
+
+
+def _cursor_last_uid(cursor, gmail, uid_validity):
+    if not cursor:
+        return None
+    if cursor.get("gmail") != gmail.strip().lower():
+        return None
+    if int(cursor.get("uid_validity", -1)) != int(uid_validity):
+        return None
+    return int(cursor.get("last_uid", 0))
 
 
 class Monitor:
@@ -159,13 +264,65 @@ class Monitor:
         self.on_payment = on_payment
         self.on_status = on_status
         self._stop_event = threading.Event()
+        self._thread = None
+        self._client = None
+        self._client_lock = threading.Lock()
 
     def start(self):
+        if self._thread and self._thread.is_alive():
+            return
         self._stop_event.clear()
-        threading.Thread(target=self._run, daemon=True).start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def stop(self):
         self._stop_event.set()
+        with self._client_lock:
+            client = self._client
+        if client:
+            try:
+                client.shutdown()
+            except Exception:
+                try:
+                    client._imap.shutdown()
+                except Exception:
+                    pass
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=5)
+
+    def _set_client(self, client):
+        with self._client_lock:
+            self._client = client
+
+    def _process_uid(self, client, uid, uid_validity):
+        data = client.fetch([uid], ["ENVELOPE"])
+        env = data[uid][b"ENVELOPE"]
+        subject = _decode_header_text(env.subject)
+        domain = ""
+        if env.from_:
+            domain = _decode_text(env.from_[0].host)
+        if not _is_candidate(subject, domain):
+            return
+
+        name, amount, body_text = _parse_envelope(env)
+        if not amount or not _is_zelle(subject, domain, body_text):
+            body_data = client.fetch([uid], ["BODY[]"])
+            raw = body_data[uid].get(b"BODY[]")
+            name, amount, body_text = _parse_envelope(env, raw)
+        if not _is_valid_payment(subject, domain, body_text, amount):
+            logging.info("UID %s: rejected bank notification", uid)
+            return
+
+        sender_email = _envelope_sender_email(env)
+        name = name or sender_email
+        logging.info("UID %s: validated Zelle payment", uid)
+        self.on_payment(
+            name,
+            amount,
+            _envelope_received_at(env),
+            _source_id(self.gmail, uid_validity, uid),
+            sender_email,
+        )
 
     def _run(self):
         backoff = 5
@@ -173,74 +330,63 @@ class Monitor:
             try:
                 self.on_status("connecting")
                 with IMAPClient(IMAP_HOST, ssl=True) as client:
+                    self._set_client(client)
                     client.login(self.gmail, self.app_password)
-                    folders = [f[2] for f in client.list_folders()]
-                    logging.info(f"FOLDERS: {folders}")
-                    client.select_folder("[Gmail]/All Mail")
+                    folder_info = client.select_folder("[Gmail]/All Mail")
+                    uid_validity = _uid_validity(folder_info)
                     self.on_status("connected")
                     backoff = 5
-                    # Track ALL existing UIDs — catches read AND unread new emails
-                    seen = set(client.search(["ALL"]))
-                    logging.info(f"BASELINE: {len(seen)} existing UIDs")
+                    cursor = _load_cursor()
+                    last_uid = _cursor_last_uid(cursor, self.gmail, uid_validity)
+                    if last_uid is None:
+                        existing = client.search(["ALL"])
+                        last_uid = max(existing, default=0)
+                        _save_cursor(self.gmail, uid_validity, last_uid)
+                        logging.info("Established Gmail monitor baseline")
                     while not self._stop_event.is_set():
+                        new_uids = client.search(["UID", f"{last_uid + 1}:*"])
+                        for uid in sorted(uid for uid in new_uids if uid > last_uid):
+                            self._process_uid(client, uid, uid_validity)
+                            last_uid = uid
+                            _save_cursor(self.gmail, uid_validity, last_uid)
+                        if self._stop_event.is_set():
+                            break
                         client.idle()
                         responses = client.idle_check(timeout=IDLE_TIMEOUT)
                         client.idle_done()
-                        logging.info(f"IDLE tick: {len(responses)} responses")
-                        if not responses:
-                            continue
-                        all_uids = set(client.search(["ALL"]))
-                        new_uids = all_uids - seen
-                        seen = all_uids
-                        logging.info(f"NEW UIDS: {sorted(new_uids)}")
-                        for uid in new_uids:
-                            try:
-                                data = client.fetch([uid], ["ENVELOPE", "BODY[]"])
-                                env = data[uid][b"ENVELOPE"]
-                                subject = _decode_text(env.subject)
-                                domain = ""
-                                if env.from_:
-                                    domain = _decode_text(env.from_[0].host)
-                                matched = _is_zelle(subject, domain)
-                                logging.info(f"UID {uid}: subj={subject!r} domain={domain!r} zelle={matched}")
-                                if not matched:
-                                    continue
-                                name, amount = _parse_envelope(env, data[uid].get(b"BODY[]"))
-                                sender_email = _envelope_sender_email(env)
-                                name = name or sender_email
-                                logging.info(f"UID {uid}: parsed name={name!r} amount={amount!r}")
-                                self.on_payment(
-                                    name,
-                                    amount,
-                                    _envelope_received_at(env),
-                                    f"gmail:{uid}",
-                                    sender_email,
-                                )
-                            except Exception as e:
-                                logging.exception(f"UID {uid} failed: {e}")
             except Exception:
                 if self._stop_event.is_set():
                     break
+                logging.exception("Gmail monitor connection failed")
                 self.on_status("reconnecting")
-                time.sleep(backoff)
+                self._stop_event.wait(backoff)
                 backoff = min(backoff * 2, 60)
+            finally:
+                self._set_client(None)
         self.on_status("stopped")
 
 
-def fetch_historical_payments(gmail, app_password, length):
+def fetch_historical_payments(
+    gmail,
+    app_password,
+    length,
+    on_progress=None,
+    cancel_event=None,
+):
     if length not in BACKFILL_YEARS and length != "Max":
         raise ValueError(f"Unsupported backfill length: {length}")
 
-    criteria = ["ALL"]
+    criteria = ["TEXT", "Zelle"]
     if length in BACKFILL_YEARS:
         since = date.today() - timedelta(days=365 * BACKFILL_YEARS[length])
-        criteria = ["SINCE", since.strftime("%d-%b-%Y")]
+        criteria = ["SINCE", since.strftime("%d-%b-%Y"), "TEXT", "Zelle"]
 
     records = []
     client = IMAPClient(IMAP_HOST, ssl=True)
+    uid_validity = 0
 
     def reconnect():
-        nonlocal client
+        nonlocal client, uid_validity
         try:
             client.logout()
         except Exception:
@@ -248,7 +394,8 @@ def fetch_historical_payments(gmail, app_password, length):
         time.sleep(1)
         client = IMAPClient(IMAP_HOST, ssl=True)
         client.login(gmail, app_password)
-        client.select_folder("[Gmail]/All Mail")
+        folder_info = client.select_folder("[Gmail]/All Mail")
+        uid_validity = _uid_validity(folder_info)
 
     def retry(operation, label):
         for attempt in range(BACKFILL_RETRIES):
@@ -268,36 +415,45 @@ def fetch_historical_payments(gmail, app_password, length):
 
     try:
         client.login(gmail, app_password)
-        client.select_folder("[Gmail]/All Mail")
+        folder_info = client.select_folder("[Gmail]/All Mail")
+        uid_validity = _uid_validity(folder_info)
         uids = retry(lambda: client.search(criteria), "search")
         logging.info("BACKFILL: scanning %d messages", len(uids))
         for start in range(0, len(uids), 100):
+            if cancel_event and cancel_event.is_set():
+                raise BackfillCancelled("Import cancelled. Existing history was not changed.")
             batch = uids[start : start + 100]
             envelopes = retry(
                 lambda: client.fetch(batch, ["ENVELOPE"]),
                 f"envelopes {start + 1}-{start + len(batch)}",
             )
             for uid in batch:
+                if cancel_event and cancel_event.is_set():
+                    raise BackfillCancelled(
+                        "Import cancelled. Existing history was not changed."
+                    )
                 data = envelopes.get(uid)
                 if not data:
                     continue
                 env = data[b"ENVELOPE"]
-                subject = _decode_text(env.subject)
+                subject = _decode_header_text(env.subject)
                 domain = ""
                 if env.from_:
                     domain = _decode_text(env.from_[0].host)
-                if not _is_zelle(subject, domain):
+                if not _is_candidate(subject, domain):
                     continue
 
-                name, amount = _parse_envelope(env)
+                name, amount, body_text = _parse_envelope(env)
                 sender_email = _envelope_sender_email(env)
-                if not name or not amount:
+                if not amount or not _is_zelle(subject, domain, body_text):
                     body_data = retry(
                         lambda: client.fetch([uid], ["BODY[]"]),
                         f"body uid {uid}",
                     )
                     raw = body_data[uid].get(b"BODY[]")
-                    name, amount = _parse_envelope(env, raw)
+                    name, amount, body_text = _parse_envelope(env, raw)
+                if not _is_valid_payment(subject, domain, body_text, amount):
+                    continue
                 name = name or sender_email
 
                 records.append(
@@ -305,8 +461,9 @@ def fetch_historical_payments(gmail, app_password, length):
                         "name": name,
                         "amount": amount,
                         "received_at": _envelope_received_at(env),
-                        "source_id": f"gmail:{uid}",
+                        "source_id": _source_id(gmail, uid_validity, uid),
                         "sender_email": sender_email,
+                        "gmail_account": gmail.strip().lower(),
                     }
                 )
             logging.info(
@@ -314,6 +471,12 @@ def fetch_historical_payments(gmail, app_password, length):
                 min(start + len(batch), len(uids)),
                 len(uids),
             )
+            if on_progress:
+                on_progress(
+                    min(start + len(batch), len(uids)),
+                    len(uids),
+                    len(records),
+                )
     finally:
         try:
             client.logout()
