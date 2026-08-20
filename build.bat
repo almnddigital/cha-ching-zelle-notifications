@@ -44,7 +44,7 @@ if errorlevel 1 goto :failed
 
 echo.
 if not exist dist\ChaChing.exe goto :failed
-powershell.exe -NoProfile -Command "$h=(Get-FileHash 'dist\ChaChing.exe' -Algorithm SHA256).Hash.ToLowerInvariant(); Set-Content -NoNewline 'dist\ChaChing.exe.sha256' ($h + '  ChaChing.exe')"
+"%BUILD_PYTHON%" build_checksum.py dist\ChaChing.exe dist\ChaChing.exe.sha256
 if errorlevel 1 goto :failed
 if not exist dist\ChaChing.exe.sha256 goto :failed
 echo  SUCCESS: dist\ChaChing.exe is ready.
