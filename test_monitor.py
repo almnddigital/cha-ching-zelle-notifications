@@ -202,6 +202,48 @@ class MonitorBackfillTests(unittest.TestCase):
             )
         )
 
+    def test_authenticated_google_group_routing_uses_original_bank_sender(self):
+        raw = (
+            b"From: 'Chase' via Group <hello@voguecleaners.co>\n"
+            b"X-Original-Sender: no.reply.alerts@chase.com\n"
+            b"X-Original-Authentication-Results: mx.google.com; "
+            b"dkim=pass header.i=@chase.com; dmarc=pass header.from=chase.com\n"
+            b"Authentication-Results: mx.google.com; arc=pass "
+            b"(dkim=pass dkdomain=chase.com dmarc=pass fromdomain=chase.com)\n"
+            b"Content-Type: text/plain; charset=utf-8\n\n"
+            b"Zelle payment KEVIN TRAN sent you money. Amount $330.00"
+        )
+
+        self.assertEqual(
+            monitor._authenticated_original_sender_domain(raw),
+            "chase.com",
+        )
+        name, amount, body, payer_email, payer_phone = monitor._parse_envelope(
+            FakeEnvelope(
+                "You received money with Zelle",
+                "voguecleaners.co",
+                datetime(2026, 8, 13, 16, 37, tzinfo=timezone.utc),
+                mailbox="hello",
+            ),
+            raw,
+        )
+        self.assertEqual(name, "KEVIN TRAN")
+        self.assertEqual(amount, "$330.00")
+        self.assertTrue(
+            monitor._is_valid_payment("You received money with Zelle", "chase.com", body, amount)
+        )
+        self.assertIsNone(payer_email)
+        self.assertIsNone(payer_phone)
+
+    def test_spoofed_original_sender_without_authentication_is_rejected(self):
+        raw = (
+            b"X-Original-Sender: no.reply.alerts@chase.com\n"
+            b"Content-Type: text/plain\n\n"
+            b"Zelle payment FAKE PERSON sent you money. Amount $330.00"
+        )
+
+        self.assertIsNone(monitor._authenticated_original_sender_domain(raw))
+
     def test_domain_matching_requires_a_real_domain_boundary(self):
         self.assertFalse(monitor._trusted_sender("fakechase.com"))
         self.assertTrue(monitor._trusted_sender("email.notifications.chase.com"))

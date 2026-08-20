@@ -58,6 +58,7 @@ def _on_payment(
 ):
     logging.info("Validated payment received")
     payer = name or payer_email or payer_phone or "Unknown sender"
+    history_changed = False
     if not is_test:
         try:
             inserted = payment_history.add_if_new(
@@ -74,8 +75,11 @@ def _on_payment(
             if not inserted:
                 logging.info("Duplicate payment notification suppressed")
                 return
+            history_changed = True
     notify.announce(payer, amount)
     if _app:
+        if history_changed:
+            _app.after(0, _app.refresh_history)
         _app.after(0, lambda: notify.show_popup(_app, payer, amount))
 
 

@@ -376,7 +376,7 @@ class HistoryWindow(ctk.CTkToplevel):
             command=self.destroy,
         ).pack(side="right")
 
-    def refresh(self):
+    def refresh(self, reset_page=True):
         try:
             self._records = payment_history.load()
             self._history_error = None
@@ -391,9 +391,9 @@ class HistoryWindow(ctk.CTkToplevel):
                 text="History storage must be recovered before importing.",
                 text_color="#ef4444",
             )
-        self._apply_search()
+        self._apply_search(reset_page=reset_page)
 
-    def _apply_search(self):
+    def _apply_search(self, reset_page=True):
         query = self._search_var.get().strip().casefold()
         if query:
             self._filtered_records = [
@@ -413,7 +413,8 @@ class HistoryWindow(ctk.CTkToplevel):
             ]
         else:
             self._filtered_records = list(self._records)
-        self._page = 0
+        if reset_page:
+            self._page = 0
         self._render_rows()
 
     def _change_page(self, delta):
@@ -426,18 +427,14 @@ class HistoryWindow(ctk.CTkToplevel):
         self._render_rows()
 
     def _render_rows(self):
-        total = payment_history.total_amount(self._filtered_records)
         if self._history_error:
             summary = self._history_error
             self._summary.configure(text_color="#ef4444")
         elif len(self._filtered_records) == len(self._records):
-            summary = f"{len(self._records)} payment(s)  •  Known total: ${total:,.2f}"
+            summary = f"{len(self._records)} payment(s)"
             self._summary.configure(text_color="#9ca3af")
         else:
-            summary = (
-                f"{len(self._filtered_records)} matching of {len(self._records)} payment(s)  "
-                f"•  Known total: ${total:,.2f}"
-            )
+            summary = f"{len(self._filtered_records)} matching of {len(self._records)} payment(s)"
             self._summary.configure(text_color="#9ca3af")
         self._summary.configure(text=summary)
 
@@ -667,3 +664,7 @@ class App(ctk.CTk):
             self._history_win.focus_force()
             return
         self._history_win = HistoryWindow(self, on_backfill)
+
+    def refresh_history(self):
+        if self._history_win and self._history_win.winfo_exists():
+            self._history_win.refresh(reset_page=False)

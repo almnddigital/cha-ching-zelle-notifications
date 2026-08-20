@@ -19,7 +19,7 @@ import email as email_lib
 import html as html_lib
 from datetime import date, datetime, timedelta, timezone
 from email.header import decode_header, make_header
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 
 from imapclient import IMAPClient
 
@@ -51,6 +51,10 @@ PHONE_VALUE = r"(?:\+?1[\s().-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}"
 NAME_VALUE = r"[A-Z][A-Z0-9&'’.\-]*(?:\s+[A-Z0-9][A-Z0-9&'’.\-]*){0,5}"
 
 BODY_NAME_PATTERNS = [
+    re.compile(
+        rf"\bzelle\s*(?:®)?\s*payment\s+({NAME_VALUE})\s+sent you money",
+        re.IGNORECASE,
+    ),
     re.compile(rf"(?<![@.\w])({NAME_VALUE})\s+sent you money", re.IGNORECASE),
     re.compile(rf"(?<![@.\w])({NAME_VALUE})\s+sent you\s+\$", re.IGNORECASE),
     re.compile(
@@ -176,6 +180,48 @@ def _envelope_sender_email(env):
     if mailbox and host:
         return f"{mailbox}@{host}"
     return None
+
+
+def _authenticated_original_sender_domain(raw_bytes):
+    if not raw_bytes:
+        return None
+    msg = email_lib.message_from_bytes(raw_bytes)
+    original_sender = None
+    for header in ("X-Original-Sender", "X-Original-From"):
+        _, address = parseaddr(msg.get(header, ""))
+        if address:
+            original_sender = address.strip().lower()
+            break
+    if not original_sender or "@" not in original_sender:
+        return None
+    domain = original_sender.rsplit("@", 1)[1].rstrip(".")
+    if not _trusted_sender(domain):
+        return None
+
+    authentication = " ".join(
+        msg.get_all("X-Original-Authentication-Results", [])
+        + msg.get_all("ARC-Authentication-Results", [])
+    )
+    receiving_authentication = " ".join(msg.get_all("Authentication-Results", []))
+    escaped_domain = re.escape(domain)
+    dkim_passed = re.search(
+        rf"\bdkim=pass\b[^;]*(?:header\.i=@|dkdomain=){escaped_domain}\b",
+        authentication,
+        re.IGNORECASE,
+    )
+    dmarc_passed = re.search(
+        rf"\bdmarc=pass\b[^;]*(?:header\.from=|fromdomain=){escaped_domain}\b",
+        authentication,
+        re.IGNORECASE,
+    )
+    arc_passed = re.search(r"\barc=pass\b", receiving_authentication, re.IGNORECASE)
+    arc_domain_passed = re.search(
+        rf"(?:\bdkim=pass\b[^;)]*dkdomain={escaped_domain}\b|"
+        rf"\bdmarc=pass\b[^;)]*fromdomain={escaped_domain}\b)",
+        receiving_authentication,
+        re.IGNORECASE,
+    )
+    return domain if (dkim_passed or dmarc_passed) and arc_passed and arc_domain_passed else None
 
 
 def _classify_payer_identity(value):
@@ -383,6 +429,7 @@ class Monitor:
             body_data = client.fetch([uid], ["BODY[]"])
             raw = body_data[uid].get(b"BODY[]")
             name, amount, body_text, payer_email, payer_phone = _parse_envelope(env, raw)
+            domain = _authenticated_original_sender_domain(raw) or domain
         if not _is_valid_payment(subject, domain, body_text, amount):
             logging.info("UID %s: rejected bank notification", uid)
             return
@@ -525,6 +572,7 @@ def fetch_historical_payments(
                     )
                     raw = body_data[uid].get(b"BODY[]")
                     name, amount, body_text, payer_email, payer_phone = _parse_envelope(env, raw)
+                    domain = _authenticated_original_sender_domain(raw) or domain
                 if not _is_valid_payment(subject, domain, body_text, amount):
                     continue
                 payer_email = _exclude_notification_email(payer_email, env, gmail)
